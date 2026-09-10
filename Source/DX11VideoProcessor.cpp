@@ -1,4 +1,4 @@
-/*
+﻿/*
 * (C) 2018-2026 see Authors.txt
 *
 * This file is part of MPC-BE.
@@ -378,6 +378,20 @@ HRESULT CDX11VideoProcessor::TextureResizeShader(
 
 // CDX11VideoProcessor
 
+static CDlssNR::Params DlssParamsFromSettings(const Settings_t& config)
+{
+	CDlssNR::Params p;
+	p.iStyle          = config.iDlssNRStyle;
+	p.iPreset         = config.iDlssNRPreset;
+	p.fIntensity      = (float)config.iDlssNRIntensity      / DLSSNR_STR_SCALE;
+	p.fLocalTone      = (float)config.iDlssNRLocalTone      / DLSSNR_STR_SCALE;
+	p.fLocalStructure = (float)config.iDlssNRLocalStructure / DLSSNR_STR_SCALE;
+	p.fSkinStructure  = (float)config.iDlssNRSkinStructure  / DLSSNR_STR_SCALE;
+	p.bUseAutoMask    = config.bDlssNRAutoMask;
+	p.bNoHistory      = config.bDlssNRNoHistory;
+	return p;
+}
+
 CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Settings_t& config, HRESULT& hr)
 	: CVideoProcessor(pFilter)
 {
@@ -408,6 +422,10 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_iHdrOsdBrightness    = config.iHdrOsdBrightness;
 	m_bConvertToSdr        = config.bConvertToSdr;
 	m_iSDRDisplayNits      = config.iSDRDisplayNits;
+	m_bDlssNR              = config.bDlssNR;
+	m_DlssParams           = DlssParamsFromSettings(config);
+	m_strDlssNRDllPath     = config.szDlssNRDllPath;
+	m_bDlssNRAfterUpscale  = config.bDlssNRAfterUpscale;
 
 	m_nCurrentAdapter = -1;
 
@@ -602,6 +620,7 @@ HRESULT CDX11VideoProcessor::Init(const HWND hwnd, const bool displayHdrChanged,
 		&pDevice,
 		&featurelevel,
 		nullptr);
+	m_FeatureLevel = featurelevel;
 #ifdef _DEBUG
 	if (hr == DXGI_ERROR_SDK_COMPONENT_MISSING || (hr == E_FAIL && !IsWindows8OrGreater())) {
 		DLog(L"WARNING: D3D11 debugging messages will not be displayed");
@@ -664,6 +683,9 @@ void CDX11VideoProcessor::ReleaseVP()
 	m_TexConvertOutput.Release();
 	m_TexResize.Release();
 	m_TexsPostScale.Release();
+	m_TexDlssIn.Release();
+	m_TexDlssOut.Release();
+	m_DlssNR.ReleaseFeature();
 
 	m_PSConvColorData.Release();
 	m_pDoviCurvesConstantBuffer.Release();
@@ -683,6 +705,10 @@ void CDX11VideoProcessor::ReleaseDevice()
 	DLog(L"CDX11VideoProcessor::ReleaseDevice()");
 
 	ReleaseVP();
+	// Tear the NGX session down before the device it was bound to disappears --
+	// Shutdown1 takes that device.
+	m_DlssNR.Shutdown();
+	m_bDlssNRActive = false;
 	m_D3D11VP.ReleaseVideoDevice();
 
 	m_StatsBackground.InvalidateDeviceObjects();
@@ -779,6 +805,9 @@ void CDX11VideoProcessor::ReleaseSwapChain()
 UINT CDX11VideoProcessor::GetPostScaleSteps()
 {
 	UINT nSteps = m_pPostScaleShaders.size();
+	if (m_bDlssNRActive && m_bDlssNRAfterUpscale) {
+		nSteps++;
+	}
 	if (m_pPSCorrection) {
 		nSteps++;
 	}
@@ -1142,6 +1171,13 @@ HRESULT CDX11VideoProcessor::SetShaderDoviCurves()
 
 void CDX11VideoProcessor::UpdateTexParams(int cdepth)
 {
+	if (m_bDlssNRActive) {
+		// The network consumes and produces RGBA16F; keeping the whole chain in
+		// float avoids a requantisation on the way in and banding on the way out.
+		m_InternalTexFmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		return;
+	}
+
 	switch (m_iTexFormat) {
 	case TEXFMT_AUTOINT:
 		m_InternalTexFmt = (cdepth > 8 || m_bVPUseRTXVideoHDR) ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -1191,7 +1227,7 @@ void CDX11VideoProcessor::CalcStatsParams()
 		if (S_OK == m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0)) {
 			SIZE charSize = m_Font3D.GetMaxCharMetric();
 			m_StatsRect.right  = m_StatsRect.left + 61 * charSize.cx + 5 + 3;
-			m_StatsRect.bottom = m_StatsRect.top + 19 * charSize.cy + 5 + 3;
+			m_StatsRect.bottom = m_StatsRect.top + 20 * charSize.cy + 5 + 3;
 		}
 		m_StatsBackground.Set(m_StatsRect, rtSize, D3DCOLOR_ARGB(80, 0, 0, 0));
 
@@ -1301,6 +1337,14 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 		m_strAdapterDescription = std::format(L"{} ({:04X}:{:04X})", dxgiAdapterDesc.Description, dxgiAdapterDesc.VendorId, dxgiAdapterDesc.DeviceId);
 		DLog(L"Graphics DXGI adapter: {}", m_strAdapterDescription);
 	}
+
+	{
+		// The NGX cubin backend writes its output through a typed UAV.
+		D3D11_FEATURE_DATA_FORMAT_SUPPORT2 fs2 = { DXGI_FORMAT_R16G16B16A16_FLOAT, 0 };
+		m_bDlssNRUavOk = SUCCEEDED(m_pDevice->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &fs2, sizeof(fs2)))
+			&& (fs2.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE);
+	}
+	UpdateDlssNR();
 
 	HRESULT hr2 = m_D3D11VP.InitVideoDevice(m_pDevice, m_pDeviceContext, m_VendorId);
 	DLogIf(FAILED(hr2), L"CDX11VideoProcessor::SetDevice() : InitVideoDevice failed with error {}", HR2Str(hr2));
@@ -2875,8 +2919,13 @@ void CDX11VideoProcessor::UpdateTexures()
 	// TODO: try making w and h a multiple of 128.
 	HRESULT hr = S_OK;
 
+	ID3D11Texture2D* const pConvertOutputBefore = m_TexConvertOutput.pTexture;
+
 	if (m_D3D11VP.IsReady()) {
-		if (m_bVPScaling) {
+		// With DLSS active the hardware VP must not upscale: the network is meant
+		// to run at source resolution, and letting the VP scale first would both
+		// cost far more and defeat the point.
+		if (m_bVPScaling && !m_bDlssNRActive) {
 			CSize texsize = m_videoRect.Size();
 			hr = m_TexConvertOutput.CheckCreate(m_pDevice, m_D3D11OutputFmt, texsize.cx, texsize.cy, Tex2D_DefaultShaderRTarget);
 			if (FAILED(hr)) {
@@ -2888,6 +2937,75 @@ void CDX11VideoProcessor::UpdateTexures()
 	}
 	else {
 		hr = m_TexConvertOutput.CheckCreate(m_pDevice, m_InternalTexFmt, m_srcRectWidth, m_srcRectHeight, Tex2D_DefaultShaderRTarget);
+	}
+
+	// Toggling while paused recreates this texture and no new sample arrives to
+	// fill it, so the pass ran over whatever happened to be in memory -- that is
+	// what turned the paused frame green. Only on an actual recreation.
+	if (m_TexConvertOutput.pTexture && m_TexConvertOutput.pTexture != pConvertOutputBefore) {
+		CComPtr<ID3D11RenderTargetView> pRTV;
+		if (S_OK == m_pDevice->CreateRenderTargetView(m_TexConvertOutput.pTexture, nullptr, &pRTV)) {
+			const FLOAT black[4] = { 0, 0, 0, 1 };
+			m_pDeviceContext->ClearRenderTargetView(pRTV, black);
+		}
+	}
+
+	if (m_bDlssNRActive && m_TexConvertOutput.pTexture) {
+		// After upscaling the network works on the displayed image, so the
+		// textures follow the window; before it, they follow the cropped source.
+		//
+		// Taken from m_srcRect rather than m_TexConvertOutput: depending on when
+		// this runs relative to the feature coming up, that texture can still be
+		// sized to m_videoRect, and the pass would then rescale the picture on
+		// its way through -- which is what clipped rows off AV1 frames and bent
+		// the aspect ratio.
+		// After upscaling the pass is a post-scale step, and those work on
+		// dstRect clipped to the window -- m_renderRect, not the whole window.
+		// Sizing from the window made the guard below reject every frame
+		// whenever the video did not fill it exactly, which read as "ticking
+		// the box turns DLSS off".
+		const UINT w = m_bDlssNRAfterUpscale ? (UINT)m_renderRect.Width()  : (UINT)m_srcRectWidth;
+		const UINT h = m_bDlssNRAfterUpscale ? (UINT)m_renderRect.Height() : (UINT)m_srcRectHeight;
+		if (!w || !h) {
+			m_TexDlssIn.Release();
+			m_TexDlssOut.Release();
+			m_DlssNR.ReleaseFeature();
+			return;
+		}
+
+		// Both textures are shared with the private D3D12 device, so the input
+		// copy is always needed -- m_TexConvertOutput carries no share handle
+		// even when its format already matches.
+		hr = m_TexDlssIn.CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, w, h, Tex2D_DefaultShaderRTargetUAVShared);
+		if (SUCCEEDED(hr)) {
+			hr = m_TexDlssOut.CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, w, h, Tex2D_DefaultShaderRTargetUAVShared);
+		}
+
+		if (FAILED(hr) || !m_TexDlssIn.pTexture || !m_TexDlssOut.pTexture) {
+			DLog(L"CDX11VideoProcessor::UpdateTexures() : failed to create DLSS textures");
+			m_bDlssNRActive = false;
+		} else if (!m_DlssNR.CreateFeature(m_TexDlssIn.pTexture, m_TexDlssOut.pTexture, w, h, m_DlssParams)) {
+			m_bDlssNRActive = false;
+		} else {
+			// Until the first Evaluate lands these hold whatever was in memory;
+			// sampling that is what turned the paused frame green.
+			for (ID3D11Texture2D* pTex : { m_TexDlssIn.pTexture.p, m_TexDlssOut.pTexture.p }) {
+				CComPtr<ID3D11RenderTargetView> pRTV;
+				if (S_OK == m_pDevice->CreateRenderTargetView(pTex, nullptr, &pRTV)) {
+					const FLOAT black[4] = { 0, 0, 0, 1 };
+					m_pDeviceContext->ClearRenderTargetView(pRTV, black);
+				}
+			}
+		}
+
+		if (!m_bDlssNRActive) {
+			m_TexDlssIn.Release();
+			m_TexDlssOut.Release();
+		}
+	} else {
+		m_TexDlssIn.Release();
+		m_TexDlssOut.Release();
+		m_DlssNR.ReleaseFeature();
 	}
 }
 
@@ -3282,7 +3400,105 @@ void CDX11VideoProcessor::DrawSubtitles(ID3D11Texture2D* pRenderTarget)
 	}
 }
 
-HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second)
+std::wstring CDX11VideoProcessor::GetDlssStatus()
+{
+	if (!m_bDlssNR) {
+		return {};
+	}
+	if (!DlssNRSupportedHere()) {
+		return L"not available on this adapter";
+	}
+	return m_DlssNR.GetStatusLine();
+}
+
+bool CDX11VideoProcessor::DlssNRSupportedHere() const
+{
+#ifndef _WIN64
+	return false; // the snippet is x64 only
+#else
+	return m_pDevice
+		&& m_VendorId == PCIV_NVIDIA
+		&& m_FeatureLevel >= D3D_FEATURE_LEVEL_11_0
+		&& m_bDlssNRUavOk;
+#endif
+}
+
+// Load or unload the NGX session to match the current setting. Cheap to call:
+// it returns immediately when nothing needs to change.
+void CDX11VideoProcessor::UpdateDlssNR()
+{
+	const bool bWanted = m_bDlssNR && DlssNRSupportedHere();
+
+	if (!bWanted) {
+		// Only drop the feature and its half-gigabyte of allocations. Unloading
+		// the 165 MB snippet and rebuilding the D3D12 session on every toggle is
+		// what stalled the picture for seconds; the session is torn down when
+		// the device goes away or the DLL path changes, not here.
+		m_DlssNR.ReleaseFeature();
+		m_bDlssNRActive = false;
+		return;
+	}
+
+	// A removed device leaves the session unusable; drop it so this rebuilds
+	// rather than failing for the rest of the run.
+	if (m_DlssNR.GetState() == CDlssNR::State::DeviceLost) {
+		m_DlssNR.Shutdown();
+	}
+	if (!m_DlssNR.IsInitialised()) {
+		// The architecture override is what lets a pre-Blackwell card past the
+		// snippet's own adapter check; without it Init refuses outright.
+		m_DlssNR.Init(m_pDevice, m_strDlssNRDllPath.c_str(), true);
+	}
+	m_bDlssNRActive = m_DlssNR.IsInitialised();
+}
+
+// One neural-rendering pass at source resolution. On any failure the caller's
+// input texture is left untouched and the chain runs exactly as before.
+HRESULT CDX11VideoProcessor::DlssNRPass(Tex2D_t* pInputTexture, const CRect& rSrc, Tex2D_t** ppResult)
+{
+	if (!pInputTexture || !ppResult || !m_TexDlssIn.pTexture || !m_TexDlssOut.pTexture
+			|| !m_DlssNR.IsFeatureReady()) {
+		return E_FAIL;
+	}
+
+	const UINT w = m_TexDlssOut.desc.Width;
+	const UINT h = m_TexDlssOut.desc.Height;
+
+	// The pass must never change the geometry. If the region we were handed is
+	// not exactly the working size, blitting it would rescale the picture; skip
+	// instead and let UpdateTexures catch up on the next frame.
+	if ((UINT)rSrc.Width() != w || (UINT)rSrc.Height() != h) {
+		DLogIf(m_bDlssNRActive, L"CDX11VideoProcessor::DlssNRPass() : {}x{} source into {}x{} textures, skipping",
+			rSrc.Width(), rSrc.Height(), w, h);
+		return E_FAIL;
+	}
+
+	// Into the shared RGBA16F input. This blit is unconditional: the snippet
+	// reads the texture from a separate D3D12 device, and m_TexConvertOutput
+	// carries no share handle whatever its format.
+	const CRect rDst(0, 0, w, h);
+	HRESULT hr = TextureCopyRect(*pInputTexture, m_TexDlssIn.pTexture, rSrc, rDst, m_pPS_Simple, nullptr, 0, false);
+	if (FAILED(hr)) {
+		return hr;
+	}
+
+	// Unbind before handing the textures to the other device.
+	ID3D11ShaderResourceView* nullSRVs[4] = {};
+	m_pDeviceContext->PSSetShaderResources(0, std::size(nullSRVs), nullSRVs);
+	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+
+	if (!m_DlssNR.Evaluate(m_DlssParams)) {
+		// Latch off rather than retrying every frame.
+		m_bDlssNRActive = false;
+		UpdateStatsStatic();
+		return E_FAIL;
+	}
+
+	*ppResult = &m_TexDlssOut;
+	return S_OK;
+}
+
+HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second, const bool bAllowDlss)
 {
 	HRESULT hr = S_OK;
 	m_bDitherUsed = false;
@@ -3298,7 +3514,8 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 			const bool bNeedShaderTransform =
 				(m_TexConvertOutput.desc.Width != dstRect.Width() || m_TexConvertOutput.desc.Height != dstRect.Height() || m_bFlip
 				|| dstRect.right > m_windowRect.right || dstRect.bottom > m_windowRect.bottom)
-				|| (m_bHdrPassthroughSupport && (m_bHdrPassthrough || m_bHdrLocalToneMapping)); // At least on Nvidia we can sometimes get the "D3D11: Removing Device" error here when HDR Passthrough.
+				|| (m_bHdrPassthroughSupport && (m_bHdrPassthrough || m_bHdrLocalToneMapping)) // At least on Nvidia we can sometimes get the "D3D11: Removing Device" error here when HDR Passthrough.
+				|| (m_bDlssNRActive && bAllowDlss); // the DLSS pass needs the intermediate texture
 			if (!bNeedShaderTransform && !numSteps) {
 				m_bVPScalingUseShaders = false;
 				hr = D3D11VPPass(pRenderTarget, rSrc, dstRect, second);
@@ -3320,6 +3537,15 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 	}
 	else {
 		pInputTexture = &m_TexSrcVideo;
+	}
+
+	const bool bDlssHere = m_bDlssNRActive && bAllowDlss && !m_bDlssNRAfterUpscale;
+	if (bDlssHere && pInputTexture) {
+		Tex2D_t* pDlssResult = nullptr;
+		if (S_OK == DlssNRPass(pInputTexture, rSrc, &pDlssResult) && pDlssResult) {
+			pInputTexture = pDlssResult;
+			rSrc.SetRect(0, 0, pDlssResult->desc.Width, pDlssResult->desc.Height);
+		}
 	}
 
 	if (numSteps) {
@@ -3349,6 +3575,25 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 			hr = ResizeShaderPass(*pInputTexture, pRT, rSrc, dstRect, rotation);
 		} else {
 			pTex = pInputTexture; // Hmm
+		}
+
+		if (m_bDlssNRActive && bAllowDlss && m_bDlssNRAfterUpscale) {
+			StepSetting();
+			Tex2D_t* pDlssResult = nullptr;
+			if (S_OK == DlssNRPass(pInputTexture, rect, &pDlssResult) && pDlssResult) {
+				// The network writes into its own shared texture, so the result
+				// still has to reach this step's render target.
+				//
+				// The source rectangle is the whole DLSS texture, not rect:
+				// rect is an absolute region of the post-scale texture and does
+				// not start at the origin, so using it here sampled past the
+				// bottom of the DLSS output. Clamp addressing then repeated the
+				// last valid row -- the band of duplicated lines.
+				const CRect rDlss(0, 0, pDlssResult->desc.Width, pDlssResult->desc.Height);
+				hr = TextureCopyRect(*pDlssResult, pRT, rDlss, rect, m_pPS_Simple, nullptr, 0, false);
+			} else {
+				hr = TextureCopyRect(*pInputTexture, pRT, rect, rect, m_pPS_Simple, nullptr, 0, false);
+			}
 		}
 
 		if (m_pPSCorrection) {
@@ -3554,7 +3799,7 @@ HRESULT CDX11VideoProcessor::GetCurentImage(long *pDIBImage)
 	auto pSub11CallBack = m_pFilter->m_pSub11CallBack;
 	m_pFilter->m_pSub11CallBack = nullptr;
 
-	hr = Process(pRGB32Texture2D, m_srcRect, imageRect, false);
+	hr = Process(pRGB32Texture2D, m_srcRect, imageRect, false, false);
 
 	m_pFilter->m_pSub11CallBack = pSub11CallBack;
 
@@ -3713,6 +3958,11 @@ HRESULT CDX11VideoProcessor::GetVPInfo(std::wstring& str)
 		str.append(L"Shaders");
 	}
 
+	if (m_bDlssNR) {
+		str.append(L"\n\n");
+		str.append(m_DlssNR.GetInfoBlock());
+	}
+
 	str.append(m_strStatsDispInfo);
 
 	if (m_pPostScaleShaders.size()) {
@@ -3813,6 +4063,9 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	bool changeSuperRes          = false;
 	bool changeRTXVideoHDR       = false;
 	bool changeLuminanceParams   = false;
+	bool changeDlssSession       = false;
+	bool changeDlssReload        = false;
+	bool changeDlssFeature       = false;
 
 	// settings that do not require preparation
 	m_bShowStats           = config.bShowStats;
@@ -3824,9 +4077,53 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 
 	// checking what needs to be changed
 
+	{
+		// Style and the four strengths are pushed on every Evaluate, so they
+		// need no rebuild; the snippet resets its own temporal history when the
+		// style changes. The preset is baked into the feature.
+		const CDlssNR::Params newParams = DlssParamsFromSettings(config);
+		if (newParams.iPreset != m_DlssParams.iPreset) {
+			changeDlssFeature = true;
+		}
+		m_DlssParams = newParams;
+
+		// Only a different DLL justifies tearing the whole session down.
+		if (m_strDlssNRDllPath != config.szDlssNRDllPath) {
+			m_strDlssNRDllPath = config.szDlssNRDllPath;
+			changeDlssReload = true;
+		}
+		if (config.bDlssNR != m_bDlssNR) {
+			m_bDlssNR = config.bDlssNR;
+			changeDlssSession = true;
+			// The hardware video processor has to be rebuilt: toggling DLSS
+			// changes the size it renders into, and a VP still configured for
+			// the old size leaves the bottom rows of the new texture unwritten
+			// -- which shows up as a band of repeated lines. The green frame
+			// this used to cause is handled where it belongs, by re-feeding the
+			// paused sample in SetSettings().
+			changeTextures = true;
+		}
+		if (config.bDlssNRAfterUpscale != m_bDlssNRAfterUpscale) {
+			m_bDlssNRAfterUpscale = config.bDlssNRAfterUpscale;
+			changeDlssFeature = true;   // the working resolution changes
+			changeTextures = true;
+		}
+	}
+
 	if (config.iResizeStats != m_iResizeStats) {
 		m_iResizeStats = config.iResizeStats;
 		changeResizeStats = true;
+	}
+
+	if (changeDlssReload) {
+		m_DlssNR.Shutdown();
+		m_bDlssNRActive = false;
+	}
+	if (changeDlssReload || changeDlssSession) {
+		UpdateDlssNR();
+	} else if (changeDlssFeature) {
+		m_DlssNR.ReleaseFeature();
+		changeTextures = true;
 	}
 
 	if (config.iTexFormat != m_iTexFormat) {
@@ -4078,6 +4375,7 @@ void CDX11VideoProcessor::Flush()
 	}
 
 	m_rtStart = 0;
+	m_DlssNR.RequestReset();
 
 	m_DoviExtensionMetadata = {};
 #ifndef NDEBUG
@@ -4242,6 +4540,20 @@ void CDX11VideoProcessor::UpdateStatsStatic()
 			}
 		}
 		m_strStatsVProc += std::format(L"\nInternalFormat: {}", DXGIFormatToString(m_InternalTexFmt));
+
+	if (m_bDlssNR) {
+		static const wchar_t* const styles[] = { L"default", L"natural", L"cinematic" };
+		const wchar_t* style = (m_DlssParams.iStyle >= 0 && m_DlssParams.iStyle < (int)std::size(styles))
+			? styles[m_DlssParams.iStyle] : L"?";
+		if (m_bDlssNRActive) {
+			m_strStatsVProc += std::format(L"\nDLSS 5 NR     : {}/P{} i{:.2f} t{:.2f} s{:.2f} k{:.2f}{}",
+				style, m_DlssParams.iPreset, m_DlssParams.fIntensity, m_DlssParams.fLocalTone,
+				m_DlssParams.fLocalStructure, m_DlssParams.fSkinStructure,
+				m_DlssParams.bUseAutoMask ? L" auto" : L"");
+		} else {
+			m_strStatsVProc += std::format(L"\nDLSS 5 NR     : {}", m_DlssNR.GetStatusLine());
+		}
+	}
 
 		if (SourceIsHDR() || m_bVPUseRTXVideoHDR) {
 			m_strStatsHDR.assign(L"\nHDR processing: ");

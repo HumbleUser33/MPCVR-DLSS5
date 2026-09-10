@@ -1,4 +1,4 @@
-/*
+﻿/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -94,6 +94,22 @@ constexpr inline auto HDR_NITS_DEF = 1000;
 constexpr inline auto HDR_NITS_MIN = 100;
 constexpr inline auto HDR_NITS_MAX = 10000;
 
+enum :int {
+	DLSSNR_STYLE_Default = 0,
+	DLSSNR_STYLE_Natural,
+	DLSSNR_STYLE_Cinematic,
+	DLSSNR_STYLE_COUNT
+};
+
+constexpr inline auto DLSSNR_PRESET_COUNT = 4;
+// Strength sliders: stored and edited as ints, divided by DLSSNR_STR_SCALE
+// before being handed to NGX.
+constexpr inline auto DLSSNR_STR_SCALE = 100;
+constexpr inline auto DLSSNR_STR_MIN   = 0;
+constexpr inline auto DLSSNR_STR_MAX   = 200;
+constexpr inline auto DLSSNR_STR_DEF   = 100;
+constexpr inline auto DLSSNR_SKIN_MIN  = -100;
+
 struct VPEnableFormats_t {
 	bool bNV12;
 	bool bP01x;
@@ -132,6 +148,26 @@ struct Settings_t {
 	bool bHdrLocalToneMapping;
 	int  iHdrLocalToneMappingType;
 	int iHdrDisplayMaxNits;
+	// DLSS 5 Neural Rendering. Strengths are stored x100 so the whole struct
+	// stays integral and round-trips through the DWORD-only registry.
+	bool bDlssNR;
+	int  iDlssNRStyle;
+	int  iDlssNRPreset;
+	int  iDlssNRIntensity;
+	int  iDlssNRLocalTone;
+	int  iDlssNRLocalStructure;
+	int  iDlssNRSkinStructure;
+	bool bDlssNRAutoMask;
+	// The network blends with its own previous output. Without motion vectors
+	// that history is misaligned on anything that moves, which shows up as a
+	// luminance shimmer -- so history is off by default.
+	bool bDlssNRNoHistory;
+	// Run the pass at display resolution, after scaling, instead of at source
+	// resolution before it. Much heavier at 4K.
+	bool bDlssNRAfterUpscale;
+	// Virtual-key code that toggles DLSS during playback, 0 = no key.
+	int  iDlssNRToggleKey;
+	wchar_t szDlssNRDllPath[MAX_PATH];
 
 	Settings_t() {
 		SetDefault();
@@ -182,6 +218,21 @@ struct Settings_t {
 		bConvertToSdr                   = true;
 		iHdrOsdBrightness               = 0;
 		iSDRDisplayNits                 = SDR_NITS_DEF;
+		bDlssNR                         = false;
+		iDlssNRStyle                    = DLSSNR_STYLE_Default;
+		iDlssNRPreset                   = 0;
+		// Tuned by ear on real video rather than left at neutral: the local
+		// terms are the ones that amplify frame-to-frame variation, so they sit
+		// well below 1.00 while overall intensity sits above it.
+		iDlssNRIntensity                = 150;   // 1.50
+		iDlssNRLocalTone                = 30;    // 0.30
+		iDlssNRLocalStructure           = 50;    // 0.50
+		iDlssNRSkinStructure            = 90;    // 0.90
+		bDlssNRAutoMask                 = true;
+		bDlssNRNoHistory                = false;
+		bDlssNRAfterUpscale             = false;
+		iDlssNRToggleKey                = VK_F12;
+		szDlssNRDllPath[0]              = L'\0';
 	}
 };
 

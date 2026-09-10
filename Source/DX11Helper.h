@@ -30,6 +30,11 @@ enum Tex2DType {
 	Tex2D_DynamicShaderWrite,
 	Tex2D_DynamicShaderWriteNoSRV,
 	Tex2D_StagingRead,
+	Tex2D_DefaultShaderRTargetUAV, // NGX writes its output through a UAV
+	// Same, plus an NT share handle: the DLSS 5 snippet only works through its
+	// D3D12 backend, so these textures are opened a second time on a private
+	// D3D12 device.
+	Tex2D_DefaultShaderRTargetUAVShared,
 };
 
 D3D11_TEXTURE2D_DESC CreateTex2DDesc(const DXGI_FORMAT format, const UINT width, const UINT height, const Tex2DType type);
@@ -47,7 +52,8 @@ struct Tex2D_t
 		}
 
 		// The type has to be part of the comparison: two textures can share a
-		// format and a size yet differ in bind flags or misc flags.
+		// format and a size yet differ in bind flags or, as for the DLSS pair,
+		// in whether they carry a share handle at all.
 		if (format == desc.Format && width == desc.Width && height == desc.Height
 				&& type == this->type && pTexture) {
 			return S_OK;

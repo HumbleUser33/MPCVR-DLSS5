@@ -5,3 +5,25 @@
 /_bin
 /revision.h
 /signinfo.txt
+
+# NVIDIA's own binary. Not ours to redistribute, and at ~159 MB it is over
+# GitHub's per-file limit anyway. See the README for where it goes.
+nvngx_dlssnr.dll
+nvngx_dlssd.dll
+nvngx_dlssg.dll
+_nvngx.dll
+
+# Build products of the diagnostic tools
+/tools/dlssnr_probe/*.exe
+/tools/dlssnr_probe/*.dll
+/tools/dlssnr_probe/*.obj
+/tools/dlssnr_probe/*.exp
+/tools/dlssnr_probe/*.lib
+/tools/dlssnr_probe/*.pdb
+/tools/dlssnr_probe/*.ilk
+/tools/dlssnr_probe/*.manifest
+/tools/dlssnr_probe/probe_results.txt
+/tools/dlssnr_probe/spoof_result.txt
+
+# Personal Claude Code permission grants
+/.claude/settings.local.json

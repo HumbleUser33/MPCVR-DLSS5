@@ -1,4 +1,22 @@
-﻿# MPC Video Renderer
+﻿# MPC Video Renderer + DLSS 5 Neural Rendering
+
+A fork of [Aleksoid1978/VideoRenderer](https://github.com/Aleksoid1978/VideoRenderer)
+that adds an optional NVIDIA **DLSS 5 Neural Rendering** pass to the Direct3D 11
+pipeline. Nothing else changes: with the option off, the renderer behaves exactly
+as upstream does.
+
+**→ [What it does, what it needs, how to build it](README-DLSS5.md)**
+
+Two things to know before you start: the feature needs NVIDIA's `nvngx_dlssnr.dll`,
+which is **not included here** and which you have to supply yourself, and it is x64
+only.
+
+For the unmodified renderer, go to [upstream](https://github.com/Aleksoid1978/VideoRenderer) —
+that is where the releases, the issue tracker and the actual development are.
+
+---
+
+## About MPC Video Renderer
 
 MPC Video Renderer is a free and open-source video renderer for DirectShow. The renderer can potentially work with any DirectShow player, but full support is available only in the MPC-BE. Recommended MPC-BE 1.8.9.106 or newer.
 
@@ -31,7 +49,8 @@ MPC Video Renderer is a free and open-source video renderer for DirectShow. The 
 
 ## License
 
-MPC Video Renderer's code is licensed under [GPL v3].
+MPC Video Renderer's code is licensed under [GPL v3]. This fork is a derivative work
+and carries the same licence.
 
 ## Download
 

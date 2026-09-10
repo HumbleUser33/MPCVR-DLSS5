@@ -71,6 +71,7 @@
     <ClCompile Include="DisplayConfig.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="DX11Helper.cpp" />
+    <ClCompile Include="DLSS\DlssNR.cpp" />
     <ClCompile Include="DX11VideoProcessor.cpp" />
     <ClCompile Include="DX9Helper.cpp" />
     <ClCompile Include="DX9VideoProcessor.cpp" />
@@ -108,6 +109,8 @@
     <ClInclude Include="D3DUtil\D3DCommon.h" />
     <ClInclude Include="DisplayConfig.h" />
     <ClInclude Include="DX11Helper.h" />
+    <ClInclude Include="DLSS\DlssNR.h" />
+    <ClInclude Include="DLSS\NGXTypes.h" />
     <ClInclude Include="DX11VideoProcessor.h" />
     <ClInclude Include="DX9Helper.h" />
     <ClInclude Include="DX9VideoProcessor.h" />

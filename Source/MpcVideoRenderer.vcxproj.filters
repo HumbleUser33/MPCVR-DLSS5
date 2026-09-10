@@ -42,6 +42,9 @@
     <ClCompile Include="DX9VideoProcessor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DLSS\DlssNR.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DX11VideoProcessor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -145,6 +148,12 @@
     </ClInclude>
     <ClInclude Include="DX9VideoProcessor.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DlssNR.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\NGXTypes.h">
+      <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="DX11VideoProcessor.h">
       <Filter>Header Files</Filter>

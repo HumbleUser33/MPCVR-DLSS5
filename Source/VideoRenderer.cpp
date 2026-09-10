@@ -1,4 +1,4 @@
-/*
+﻿/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -68,8 +68,25 @@
 #define OPT_ConvertToSdr                   L"ConvertToSdr"
 #define OPT_UseD3DFullscreen               L"UseD3DFullscreen"
 #define OPT_DisplayNits                    L"DisplayNits"
+#define OPT_DlssNR                         L"DlssNeuralRendering"
+#define OPT_DlssNRStyle                    L"DlssNRStyle"
+#define OPT_DlssNRPreset                   L"DlssNRPreset"
+#define OPT_DlssNRIntensity                L"DlssNRIntensity"
+#define OPT_DlssNRLocalTone                L"DlssNRLocalToneStrength"
+#define OPT_DlssNRLocalStructure           L"DlssNRLocalStructureStrength"
+#define OPT_DlssNRSkinStructure            L"DlssNRSkinStructureStrength"
+#define OPT_DlssNRAutoMask                 L"DlssNRUseAutoMask"
+#define OPT_DlssNRNoHistory                L"DlssNRDisableTemporalHistory"
+#define OPT_DlssNRAfterUpscale             L"DlssNRApplyAfterUpscaling"
+#define OPT_DlssNRToggleKey                L"DlssNRToggleKey"
+#define OPT_DlssNRDllPath                  L"DlssNRDllPath"
 
 static std::atomic_int g_nInstance = 0;
+
+// The keyboard hook is a plain callback, so it needs a way back to the filter.
+// One renderer per process in practice; if a second one appears the last to
+// install wins, which is no worse than two filters fighting over one key.
+static CMpcVideoRenderer* g_pToggleKeyOwner = nullptr;
 static const wchar_t g_szClassName[] = L"VRWindow";
 
 LPCWSTR g_pszOldParentWndProc = L"OldParentWndProc";
@@ -272,6 +289,50 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DisplayNits, dw)) {
 			m_Sets.iSDRDisplayNits = discard<int>(dw, SDR_NITS_DEF, SDR_NITS_MIN, SDR_NITS_MAX);
 		}
+#ifdef _WIN64
+		// The DLSS 5 NR snippet is x64 only.
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNR, dw)) {
+			m_Sets.bDlssNR = !!dw;
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRStyle, dw)) {
+			m_Sets.iDlssNRStyle = discard<int>((int)dw, DLSSNR_STYLE_Default, 0, DLSSNR_STYLE_COUNT-1);
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRPreset, dw)) {
+			m_Sets.iDlssNRPreset = discard<int>((int)dw, 0, 0, DLSSNR_PRESET_COUNT-1);
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRIntensity, dw)) {
+			m_Sets.iDlssNRIntensity = discard<int>((int)dw, DLSSNR_STR_DEF, DLSSNR_STR_MIN, DLSSNR_STR_MAX);
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRLocalTone, dw)) {
+			m_Sets.iDlssNRLocalTone = discard<int>((int)dw, DLSSNR_STR_DEF, DLSSNR_STR_MIN, DLSSNR_STR_MAX);
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRLocalStructure, dw)) {
+			m_Sets.iDlssNRLocalStructure = discard<int>((int)dw, DLSSNR_STR_DEF, DLSSNR_STR_MIN, DLSSNR_STR_MAX);
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRSkinStructure, dw)) {
+			// Negative values round-trip through DWORD as two's complement.
+			m_Sets.iDlssNRSkinStructure = discard<int>((int)dw, DLSSNR_STR_DEF, DLSSNR_SKIN_MIN, DLSSNR_STR_MAX);
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRAutoMask, dw)) {
+			m_Sets.bDlssNRAutoMask = !!dw;
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRNoHistory, dw)) {
+			m_Sets.bDlssNRNoHistory = !!dw;
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRAfterUpscale, dw)) {
+			m_Sets.bDlssNRAfterUpscale = !!dw;
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRToggleKey, dw)) {
+			m_Sets.iDlssNRToggleKey = discard<int>((int)dw, VK_F12, 0, 0xFF);
+		}
+		{
+			ULONG nChars = std::size(m_Sets.szDlssNRDllPath);
+			if (ERROR_SUCCESS != key.QueryStringValue(OPT_DlssNRDllPath, m_Sets.szDlssNRDllPath, &nChars)) {
+				m_Sets.szDlssNRDllPath[0] = L'\0';
+			}
+			m_Sets.szDlssNRDllPath[std::size(m_Sets.szDlssNRDllPath) - 1] = L'\0';
+		}
+#endif
 	}
 
 	if (!IsWindows10OrGreater()) {
@@ -307,9 +368,82 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 	return;
 }
 
+// ---------------------------------------------------------------------------
+// DLSS toggle key
+//
+// A thread-local WH_KEYBOARD hook on the thread that owns the video window, so
+// it sees only that thread's input -- no system-wide hook. It swallows the one
+// key it is bound to and passes everything else through untouched, which
+// matters because the default (Home) is also a seek shortcut in most players.
+// ---------------------------------------------------------------------------
+
+LRESULT CALLBACK CMpcVideoRenderer::ToggleKeyProc(int code, WPARAM wParam, LPARAM lParam)
+{
+	CMpcVideoRenderer* pThis = g_pToggleKeyOwner;
+
+	if (code == HC_ACTION && pThis && pThis->m_Sets.iDlssNRToggleKey
+			&& (int)wParam == pThis->m_Sets.iDlssNRToggleKey) {
+		const bool bKeyUp = (lParam & 0x80000000) != 0;
+		const bool bRepeat = (lParam & 0x40000000) != 0;
+
+		if (!bKeyUp && !bRepeat) {
+			pThis->Flt_SetBool("dlssNR", !pThis->m_Sets.bDlssNR);
+		}
+		return 1; // consumed, so the player does not also act on it
+	}
+
+	return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+void CMpcVideoRenderer::InstallToggleKeyHook()
+{
+	if (!m_Sets.iDlssNRToggleKey) {
+		RemoveToggleKeyHook();
+		return;
+	}
+
+	// Keys arrive on the player's UI thread, which owns its main window -- not
+	// necessarily the thread that called Init(). Hooking our own thread saw no
+	// keystrokes at all, which is why the shortcut did nothing.
+	HWND hTarget = m_hWndParentMain ? m_hWndParentMain
+	             : (m_hWndParent ? m_hWndParent : m_hWndWindow);
+	if (!hTarget) {
+		return;
+	}
+	const DWORD dwThread = GetWindowThreadProcessId(hTarget, nullptr);
+	if (!dwThread) {
+		return;
+	}
+	if (m_hKeyboardHook && dwThread == m_dwHookedThread) {
+		return;
+	}
+
+	RemoveToggleKeyHook();
+	g_pToggleKeyOwner = this;
+	m_hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD, &CMpcVideoRenderer::ToggleKeyProc,
+	                                    nullptr, dwThread);
+	m_dwHookedThread = m_hKeyboardHook ? dwThread : 0;
+	DLogIf(!m_hKeyboardHook, L"CMpcVideoRenderer::InstallToggleKeyHook() : failed on thread {}, error {}",
+		dwThread, GetLastError());
+}
+
+void CMpcVideoRenderer::RemoveToggleKeyHook()
+{
+	if (m_hKeyboardHook) {
+		UnhookWindowsHookEx(m_hKeyboardHook);
+		m_hKeyboardHook = nullptr;
+	}
+	m_dwHookedThread = 0;
+	if (g_pToggleKeyOwner == this) {
+		g_pToggleKeyOwner = nullptr;
+	}
+}
+
 CMpcVideoRenderer::~CMpcVideoRenderer()
 {
 	DLog(L"CMpcVideoRenderer::~CMpcVideoRenderer()");
+
+	RemoveToggleKeyHook();
 
 	UnregisterClassW(g_szClassName, g_hInst);
 
@@ -1091,6 +1225,8 @@ HRESULT CMpcVideoRenderer::Init(const bool bCreateWindow/* = false*/)
 		m_hWnd = m_hWndParent;
 	}
 
+	InstallToggleKeyHook();
+
 	bool bChangeDevice = false;
 	hr = m_VideoProcessor->Init(m_hWnd, false, &bChangeDevice);
 
@@ -1260,8 +1396,17 @@ STDMETHODIMP_(void) CMpcVideoRenderer::SetSettings(const Settings_t& setings)
 	m_Sets = setings;
 	m_VideoProcessor->Configure(m_Sets);
 
+	// Picking a different key takes effect immediately; this is a no-op when
+	// the key and the thread are unchanged.
+	InstallToggleKeyHook();
+
 	if (m_State == State_Paused) {
-		if (!m_bValidBuffer && m_pMediaSample) {
+		// Always re-render the sample, not only when the buffer is stale: a
+		// settings change can rebuild the hardware video processor, which then
+		// has no frame queued. Its next Blt converts YUV zeroes, and that is
+		// green in BT.709 -- the green frame seen when toggling DLSS on
+		// hardware-decoded video.
+		if (m_pMediaSample) {
 			m_bInReceive = FALSE;
 
 			DoRenderSample(m_pMediaSample);
@@ -1309,6 +1454,20 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 		key.SetDWORDValue(OPT_HdrOsdBrightness,    m_Sets.iHdrOsdBrightness);
 		key.SetDWORDValue(OPT_ConvertToSdr,        m_Sets.bConvertToSdr);
 		key.SetDWORDValue(OPT_DisplayNits,         m_Sets.iSDRDisplayNits);
+#ifdef _WIN64
+		key.SetDWORDValue(OPT_DlssNR,              m_Sets.bDlssNR);
+		key.SetDWORDValue(OPT_DlssNRStyle,         m_Sets.iDlssNRStyle);
+		key.SetDWORDValue(OPT_DlssNRPreset,        m_Sets.iDlssNRPreset);
+		key.SetDWORDValue(OPT_DlssNRIntensity,     m_Sets.iDlssNRIntensity);
+		key.SetDWORDValue(OPT_DlssNRLocalTone,     m_Sets.iDlssNRLocalTone);
+		key.SetDWORDValue(OPT_DlssNRLocalStructure, m_Sets.iDlssNRLocalStructure);
+		key.SetDWORDValue(OPT_DlssNRSkinStructure, m_Sets.iDlssNRSkinStructure);
+		key.SetDWORDValue(OPT_DlssNRAutoMask,      m_Sets.bDlssNRAutoMask);
+		key.SetDWORDValue(OPT_DlssNRNoHistory,     m_Sets.bDlssNRNoHistory);
+		key.SetDWORDValue(OPT_DlssNRAfterUpscale,  m_Sets.bDlssNRAfterUpscale);
+		key.SetDWORDValue(OPT_DlssNRToggleKey,     m_Sets.iDlssNRToggleKey);
+		key.SetStringValue(OPT_DlssNRDllPath,      m_Sets.szDlssNRDllPath);
+#endif
 	}
 
 	return S_OK;
@@ -1338,6 +1497,11 @@ STDMETHODIMP CMpcVideoRenderer::Flt_GetBool(LPCSTR field, bool* value)
 
 	if (!strcmp(field, "statsEnable")) {
 		*value = m_Sets.bShowStats;
+		return S_OK;
+	}
+
+	if (!strcmp(field, "dlssNR")) {
+		*value = m_Sets.bDlssNR;
 		return S_OK;
 	}
 
@@ -1394,6 +1558,34 @@ STDMETHODIMP CMpcVideoRenderer::Flt_GetInt64(LPCSTR field, __int64 *value)
 	return E_INVALIDARG;
 }
 
+STDMETHODIMP CMpcVideoRenderer::Flt_GetString(LPCSTR field, LPWSTR* value, unsigned* chars)
+{
+	CheckPointer(value, E_POINTER);
+
+	// One line describing the DLSS 5 NR session, for the property page.
+	if (!strcmp(field, "dlssStatus")) {
+		CAutoLock cRendererLock(&m_RendererLock);
+		std::wstring str;
+		if (m_VideoProcessor) {
+			str = m_VideoProcessor->GetDlssStatus();
+		}
+		const size_t len = str.size();
+		LPWSTR buf = (LPWSTR)CoTaskMemAlloc((len + 1) * sizeof(WCHAR));
+		if (!buf) {
+			return E_OUTOFMEMORY;
+		}
+		memcpy(buf, str.c_str(), len * sizeof(WCHAR));
+		buf[len] = L'\0';
+		*value = buf;
+		if (chars) {
+			*chars = (unsigned)len;
+		}
+		return S_OK;
+	}
+
+	return E_INVALIDARG;
+}
+
 STDMETHODIMP CMpcVideoRenderer::Flt_GetBin(LPCSTR field, LPVOID* value, unsigned* size)
 {
 	if (!strcmp(field, "displayedImage")) {
@@ -1415,6 +1607,23 @@ STDMETHODIMP CMpcVideoRenderer::Flt_SetBool(LPCSTR field, bool value)
 {
 	if (!strcmp(field, "cmd_redraw") && value) {
 		Redraw();
+		return S_OK;
+	}
+
+	// Toggling DLSS without opening the property page, so it can be bound to a
+	// key or driven from a script. Same path as the checkbox: Configure()
+	// applies it live, no session reload.
+	if (!strcmp(field, "dlssNR")) {
+		if (m_Sets.bDlssNR != value) {
+			CAutoLock cRendererLock(&m_RendererLock);
+
+			m_Sets.bDlssNR = value;
+			m_VideoProcessor->Configure(m_Sets);
+			SaveSettings();
+			if (m_filterState != State_Running) {
+				Redraw();
+			}
+		}
 		return S_OK;
 	}
 

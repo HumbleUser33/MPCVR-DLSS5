@@ -1,4 +1,4 @@
-/*
+﻿/*
 * (C) 2018-2026 see Authors.txt
 *
 * This file is part of MPC-BE.
@@ -30,6 +30,7 @@
 #include "D3D11VP.h"
 #include "D3DUtil/D3D11Font.h"
 #include "D3DUtil/D3D11Geometry.h"
+#include "DLSS/DlssNR.h"
 #include "VideoProcessor.h"
 #include "SubPic/DX11SubPic.h"
 
@@ -72,6 +73,8 @@ private:
 	Tex2D_t m_TexResize;        // for intermediate result of two-pass resize
 	CTex2DRing m_TexsPostScale;
 	Tex2D_t m_TexDither;
+	Tex2D_t m_TexDlssIn;  // RGBA16F copy of the converted frame, only when a format change is needed
+	Tex2D_t m_TexDlssOut; // RGBA16F NGX output, always UAV-capable
 
 	// for GetAlignmentSize()
 	struct Alignment_t {
@@ -184,6 +187,15 @@ private:
 
 	bool m_bVPRTXVideoHDR = false;
 	bool m_bVPUseRTXVideoHDR = false;
+
+	CDlssNR m_DlssNR;
+	CDlssNR::Params m_DlssParams;
+	std::wstring m_strDlssNRDllPath;
+	bool m_bDlssNR = false;       // user setting
+	bool m_bDlssNRActive = false; // setting AND actually working
+	bool m_bDlssNRUavOk = false;  // RGBA16F typed UAV store supported
+	bool m_bDlssNRAfterUpscale = false; // run at display resolution instead
+	D3D_FEATURE_LEVEL m_FeatureLevel = D3D_FEATURE_LEVEL_10_0;
 
 	bool m_bHdrPassthroughSupport             = false;
 	std::atomic_bool m_bHdrDisplaySwitching   = false; // switching HDR display in progress
@@ -354,7 +366,13 @@ private:
 	HRESULT FinalPass(const Tex2D_t& Tex, ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect);
 
 	void DrawSubtitles(ID3D11Texture2D* pRenderTarget);
-	HRESULT Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second);
+	// bAllowDlss is false for the screenshot path, which must not disturb the
+	// network's temporal history.
+	HRESULT Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second, const bool bAllowDlss = true);
+	HRESULT DlssNRPass(Tex2D_t* pInputTexture, const CRect& rSrc, Tex2D_t** ppResult);
+	bool DlssNRSupportedHere() const;
+	void UpdateDlssNR();
+	std::wstring GetDlssStatus() override;
 
 	HRESULT AlphaBlt(ID3D11ShaderResourceView* pShaderResource, ID3D11Texture2D* pRenderTarget,
 					 ID3D11Buffer* pVertexBuffer, D3D11_VIEWPORT* pViewPort,

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * (C) 2020-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -203,6 +203,9 @@ public:
 	// Settings
 	void SetShowStats(bool value);
 	virtual void Configure(const Settings_t& config) = 0;
+
+	// One line describing the DLSS 5 NR session; empty when not applicable.
+	virtual std::wstring GetDlssStatus() { return {}; }
 
 	int GetRotation() { return m_iRotation; }
 	virtual void SetRotation(int value) = 0;

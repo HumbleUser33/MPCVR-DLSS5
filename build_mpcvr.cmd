@@ -127,8 +127,20 @@ IF DEFINED SEVENZIP (
 .\distrib\Reset_Settings.cmd ^
 .\Readme.md ^
 .\history.txt ^
-.\LICENSE.txt
+.\LICENSE.txt ^
+.\README-DLSS5.md
     IF %ERRORLEVEL% NEQ 0 CALL :SubMsg "ERROR" "Unable to create %PCKG_NAME%.zip!"
+
+    REM The NGX caller-validation shim. It lives in dlss\ rather than beside the
+    REM .ax so that it can never be picked up in place of NVIDIA's own nvngx.dll.
+    REM x64 only: the DLSS pass is compiled out of the Win32 build.
+    IF EXIST "_bin\Filter_x64%SUFFIX%\dlss\nvngx.dll" (
+      PUSHD "_bin\Filter_x64%SUFFIX%"
+      START "7z" /B /WAIT "%SEVENZIP%" a -tzip -mx9 "%~dp0_bin\%PCKG_NAME%.zip" dlss\nvngx.dll
+      POPD
+      IF !ERRORLEVEL! NEQ 0 CALL :SubMsg "ERROR" "Unable to add the NGX shim to %PCKG_NAME%.zip!"
+    )
+
     EXIT /B %ERRORLEVEL%
     CALL :SubMsg "INFO" "%PCKG_NAME%.zip successfully created"
 )

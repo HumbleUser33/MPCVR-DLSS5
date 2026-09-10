@@ -60,6 +60,18 @@ D3D11_TEXTURE2D_DESC CreateTex2DDesc(const DXGI_FORMAT format, const UINT width,
 		desc.CPUAccessFlags = 0;
 		desc.MiscFlags = 0;
 		break;
+	case Tex2D_DefaultShaderRTargetUAV:
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = 0;
+		break;
+	case Tex2D_DefaultShaderRTargetUAVShared:
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
+		break;
 	case Tex2D_DynamicShaderWrite:
 	case Tex2D_DynamicShaderWriteNoSRV:
 		desc.Usage = D3D11_USAGE_DYNAMIC;

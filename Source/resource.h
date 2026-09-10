@@ -1,4 +1,4 @@
-//{{NO_DEPENDENCIES}}
+﻿//{{NO_DEPENDENCIES}}
 // Microsoft Visual C++ generated include file.
 // Used by MpcVideoRenderer.rc
 //
@@ -132,6 +132,33 @@
 #define IDC_COMBO10                     1063
 #define IDC_STATIC99                    1064
 #define IDC_STATIC100                   1065
+#define IDC_CHECK20                     1070
+#define IDC_CHECK21                     1071
+#define IDC_COMBO11                     1072
+#define IDC_COMBO12                     1073
+#define IDC_SLIDER3                     1074
+#define IDC_SLIDER4                     1075
+#define IDC_SLIDER5                     1076
+#define IDC_SLIDER6                     1077
+#define IDC_EDIT3                       1078
+#define IDC_EDIT4                       1079
+#define IDC_EDIT5                       1080
+#define IDC_EDIT6                       1081
+#define IDC_EDIT7                       1082
+#define IDC_BUTTON2                     1083
+#define IDC_STATIC20                    1084
+#define IDC_STATIC21                    1085
+#define IDC_STATIC22                    1086
+#define IDC_STATIC23                    1087
+#define IDC_STATIC24                    1088
+#define IDC_STATIC25                    1089
+#define IDC_STATIC26                    1090
+#define IDC_STATIC27                    1091
+#define IDC_STATIC28                    1092
+#define IDC_CHECK22                     1093
+#define IDC_CHECK23                     1094
+#define IDC_COMBO13                     1095
+#define IDC_STATIC29                    1096
 
 // Next default values for new objects
 // 
@@ -139,7 +166,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        106
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1065
+#define _APS_NEXT_CONTROL_VALUE         1097
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

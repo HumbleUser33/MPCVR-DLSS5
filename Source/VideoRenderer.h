@@ -1,4 +1,4 @@
-/*
+﻿/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -102,6 +102,14 @@ private:
 	bool m_bValidBuffer = false;
 
 	HWND m_hWnd           = nullptr;
+	// Thread-local keyboard hook for the DLSS toggle key. Scoped to the thread
+	// that owns the video window, and it only swallows the one key it is bound
+	// to -- everything else passes straight through to the player.
+	HHOOK m_hKeyboardHook = nullptr;
+	DWORD m_dwHookedThread = 0;
+	void InstallToggleKeyHook();
+	void RemoveToggleKeyHook();
+	static LRESULT CALLBACK ToggleKeyProc(int code, WPARAM wParam, LPARAM lParam);
 	HWND m_hWndWindow     = nullptr;
 	HWND m_hWndParent     = nullptr;
 	HWND m_hWndDrain      = nullptr;
@@ -282,6 +290,7 @@ public:
 	STDMETHODIMP Flt_GetInt(LPCSTR field,  int*  value) override;
 	STDMETHODIMP Flt_GetInt64(LPCSTR field, __int64* value) override;
 	STDMETHODIMP Flt_GetBin(LPCSTR field, LPVOID* value, unsigned* size) override;
+	STDMETHODIMP Flt_GetString(LPCSTR field, LPWSTR* value, unsigned* chars) override;
 
 	STDMETHODIMP Flt_SetBool(LPCSTR field, bool value) override;
 	STDMETHODIMP Flt_SetInt(LPCSTR field, int value) override;
