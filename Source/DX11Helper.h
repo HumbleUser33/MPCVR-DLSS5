@@ -39,13 +39,17 @@ struct Tex2D_t
 	CComPtr<ID3D11Texture2D> pTexture;
 	D3D11_TEXTURE2D_DESC desc = {};
 	CComPtr<ID3D11ShaderResourceView> pShaderResource;
+	Tex2DType type = Tex2D_Default;
 
 	HRESULT CheckCreate(ID3D11Device* pDevice, const DXGI_FORMAT format, const UINT width, const UINT height, const Tex2DType type) {
 		if (!width || !height) {
 			return E_FAIL;
 		}
 
-		if (format == desc.Format && width == desc.Width && height == desc.Height) {
+		// The type has to be part of the comparison: two textures can share a
+		// format and a size yet differ in bind flags or misc flags.
+		if (format == desc.Format && width == desc.Width && height == desc.Height
+				&& type == this->type && pTexture) {
 			return S_OK;
 		}
 
@@ -59,6 +63,7 @@ struct Tex2D_t
 		HRESULT hr = pDevice->CreateTexture2D(&texdesc, nullptr, &pTexture);
 		if (S_OK == hr) {
 			pTexture->GetDesc(&desc);
+			this->type = type;
 
 			if (type != Tex2D_DynamicShaderWriteNoSRV && (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE)) {
 				D3D11_SHADER_RESOURCE_VIEW_DESC shaderDesc;
@@ -81,6 +86,7 @@ struct Tex2D_t
 		pShaderResource.Release();
 		pTexture.Release();
 		desc = {};
+		type = Tex2D_Default;
 	}
 };
 
