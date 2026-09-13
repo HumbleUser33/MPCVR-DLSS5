@@ -1401,11 +1401,11 @@ STDMETHODIMP_(void) CMpcVideoRenderer::SetSettings(const Settings_t& setings)
 	InstallToggleKeyHook();
 
 	if (m_State == State_Paused) {
-		// Always re-render the sample, not only when the buffer is stale: a
-		// settings change can rebuild the hardware video processor, which then
-		// has no frame queued. Its next Blt converts YUV zeroes, and that is
-		// green in BT.709 -- the green frame seen when toggling DLSS on
-		// hardware-decoded video.
+		// Re-render a pending sample even when the buffer is valid, so that the
+		// change shows on it. There often is none -- the base class releases
+		// each sample once drawn -- which is why this alone could not stop the
+		// green frame after a rebuild of the hardware video processor; the
+		// picture is now kept across that rebuild in Configure().
 		if (m_pMediaSample) {
 			m_bInReceive = FALSE;
 

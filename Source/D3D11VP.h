@@ -190,6 +190,11 @@ public:
 			m_InputViews.back() = view;
 		}
 	}
+
+	IMediaSample* GetLastSample()
+	{
+		return m_Samples.empty() ? nullptr : m_Samples.back().p;
+	}
 };
 
 // D3D11 Video Processor
@@ -279,4 +284,18 @@ public:
 	HRESULT SetRTXVideoHDR(bool enable);
 
 	HRESULT Process(ID3D11Texture2D* pRenderTarget, const D3D11_VIDEO_FRAME_FORMAT sampleFormat, const bool second);
+
+	// The picture the processor holds, for a rebuild that keeps the input format
+	// and size. InitVideoProcessor() drops it, and the new input textures then
+	// show whatever memory they were given.
+	struct HeldFrame {
+		CComPtr<ID3D11Texture2D> pTexture; // an uploaded copy, or the decoder texture array
+		CComPtr<IMediaSample>    pSample;  // decoder output only
+		UINT ArraySlice = 0;
+	};
+	HeldFrame HoldFrame();
+	void RestoreFrame(const HeldFrame& frame, ID3D11DeviceContext* pContext, const D3D11_VIDEO_FRAME_FORMAT vframeFormat);
+
+private:
+	UINT m_nLastArraySlice = 0; // of the newest decoder sample, for HoldFrame()
 };

@@ -4098,9 +4098,8 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 			// The hardware video processor has to be rebuilt: toggling DLSS
 			// changes the size it renders into, and a VP still configured for
 			// the old size leaves the bottom rows of the new texture unwritten
-			// -- which shows up as a band of repeated lines. The green frame
-			// this used to cause is handled where it belongs, by re-feeding the
-			// paused sample in SetSettings().
+			// -- which shows up as a band of repeated lines. The picture on
+			// screen is carried across that rebuild in the changeTextures block.
 			changeTextures = true;
 		}
 		if (config.bDlssNRAfterUpscale != m_bDlssNRAfterUpscale) {
@@ -4303,8 +4302,16 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	if (changeTextures) {
 		UpdateTexParams(m_srcParams.CDepth);
 		if (m_D3D11VP.IsReady()) {
+			// The rebuild drops the picture the processor holds, and its new input
+			// textures show whatever memory they were given -- green when that is
+			// zeroes. While paused nothing replaces it: the renderer releases each
+			// sample once drawn, so SetSettings() often has none to re-feed. The
+			// input format and size do not change here, so hand the picture back.
+			// Measured in tools/dlssnr_probe/vp_rebuild_test.cpp.
+			const CD3D11VP::HeldFrame heldFrame = m_D3D11VP.HoldFrame();
 			// update m_D3D11OutputFmt
 			EXECUTE_ASSERT(S_OK == InitializeD3D11VP(m_srcParams, m_srcWidth, m_srcHeight, &m_pFilter->m_inputMT));
+			m_D3D11VP.RestoreFrame(heldFrame, m_pDeviceContext, m_SampleFormat);
 		}
 		UpdateTexures();
 		UpdatePostScaleTexures();

@@ -30,10 +30,16 @@ cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x
    "%MH%\hook.c" "%MH%\buffer.c" "%MH%\trampoline.c" "%MH%\hde\hde64.c" ^
    /Fe:dlssnr_harness.exe || EXIT /B 1
 
+ECHO Building the video processor rebuild test (the paused green frame)...
+cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 ^
+   /DUNICODE /D_UNICODE /I"%SRC%" vp_rebuild_test.cpp ^
+   "%SRC%\D3D11VP.cpp" "%SRC%\DX11Helper.cpp" ^
+   /Fe:vp_rebuild_test.exe /link strmiids.lib || EXIT /B 1
+
 DEL /Q *.obj *.exp 2>NUL
 
 ECHO.
-ECHO Run dlssnr_harness.exe before putting a build in the player.
+ECHO Run dlssnr_harness.exe and vp_rebuild_test.exe before putting a build in the player.
 ECHO.
 ECHO Done. Usage:
 ECHO   dlssnr_probe.exe                  report only, nothing altered

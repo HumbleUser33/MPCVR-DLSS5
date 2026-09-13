@@ -502,6 +502,57 @@ void CD3D11VP::SetInputVideoData(ID3D11Texture2D* pTexture, IMediaSample* pSampl
 
 	m_VideoInputData.PushSample(pSample);
 	m_VideoInputData.SetInputView(inputDecoderView.p);
+	m_nLastArraySlice = ArraySlice;
+}
+
+CD3D11VP::HeldFrame CD3D11VP::HoldFrame()
+{
+	HeldFrame frame;
+	if (!m_bPresentFrame) {
+		return frame;
+	}
+
+	if (m_VideoTextures.Size()) {
+		// An uploaded frame: the newest copy is at the back of the ring.
+		frame.pTexture = *m_VideoTextures.GetTexture();
+	}
+	else if (m_VideoInputData.GetLastSample()) {
+		// Decoder output is used in place; holding the sample keeps its surface.
+		frame.pTexture   = m_VideoInputData.GetTexture();
+		frame.pSample    = m_VideoInputData.GetLastSample();
+		frame.ArraySlice = m_nLastArraySlice;
+	}
+
+	return frame;
+}
+
+void CD3D11VP::RestoreFrame(const HeldFrame& frame, ID3D11DeviceContext* pContext, const D3D11_VIDEO_FRAME_FORMAT vframeFormat)
+{
+	if (!frame.pTexture || !IsReady()) {
+		return;
+	}
+
+	if (frame.pSample) {
+		SetInputVideoData(frame.pTexture, frame.pSample, frame.ArraySlice, vframeFormat);
+		return;
+	}
+
+	ID3D11Texture2D* pRingTexture = m_VideoTextures.Size() ? *m_VideoTextures.GetTexture() : nullptr;
+	if (!pRingTexture || !pContext) {
+		return;
+	}
+
+	// Only into input textures of the same shape: anything else means the
+	// rebuild changed more than the input it was supposed to keep.
+	D3D11_TEXTURE2D_DESC held = {};
+	D3D11_TEXTURE2D_DESC ring = {};
+	frame.pTexture->GetDesc(&held);
+	pRingTexture->GetDesc(&ring);
+	if (held.Format != ring.Format || held.Width != ring.Width || held.Height != ring.Height) {
+		return;
+	}
+
+	pContext->CopyResource(GetNextInputTexture(vframeFormat), frame.pTexture);
 }
 
 void CD3D11VP::ResetFrameOrder()
