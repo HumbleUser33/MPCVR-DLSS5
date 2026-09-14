@@ -30,6 +30,7 @@
 #include "D3D11VP.h"
 #include "D3DUtil/D3D11Font.h"
 #include "D3DUtil/D3D11Geometry.h"
+#include "DLSS/DlssStabilizer.h"
 #include "DLSS/DlssNR.h"
 #include "VideoProcessor.h"
 #include "SubPic/DX11SubPic.h"
@@ -195,6 +196,17 @@ private:
 	bool m_bDlssNRActive = false; // setting AND actually working
 	bool m_bDlssNRUavOk = false;  // RGBA16F typed UAV store supported
 	bool m_bDlssNRAfterUpscale = false; // run at display resolution instead
+	CDlssStabilizer m_DlssStabilizer;   // steadies the network's effect after it runs
+	int  m_iDlssNRStabilizer = DLSSNR_STAB_DEF;
+	int  m_iDlssNRMotion = DLSSNR_MOTION_DEF;
+	bool m_bDlssNRMotionVectors = false; // Optical Flow vectors to the network as well
+	bool m_bDlssNewPicture = false;     // the next DLSS pass sees a new picture, not a redraw
+
+	CDlssStabilizer::Motion DlssMotionSource() const
+	{
+		return (m_iDlssNRMotion == DLSSNR_MOTION_DETECTOR)
+			? CDlssStabilizer::Motion::Detector : CDlssStabilizer::Motion::OpticalFlow;
+	}
 	D3D_FEATURE_LEVEL m_FeatureLevel = D3D_FEATURE_LEVEL_10_0;
 
 	bool m_bHdrPassthroughSupport             = false;

@@ -109,6 +109,15 @@ constexpr inline auto DLSSNR_STR_MIN   = 0;
 constexpr inline auto DLSSNR_STR_MAX   = 200;
 constexpr inline auto DLSSNR_STR_DEF   = 100;
 constexpr inline auto DLSSNR_SKIN_MIN  = -100;
+// Temporal stabilizer, 0..100: how strongly the network's effect is steadied over
+// time after it runs. 0 runs nothing; 100 is the measured setting.
+constexpr inline auto DLSSNR_STAB_MIN  = 0;
+constexpr inline auto DLSSNR_STAB_MAX  = 100;
+constexpr inline auto DLSSNR_STAB_DEF  = 100;
+// Where the stabilizer takes motion from.
+constexpr inline auto DLSSNR_MOTION_DETECTOR    = 0;   // shader detector: still areas only
+constexpr inline auto DLSSNR_MOTION_OPTICALFLOW = 1;   // NVIDIA Optical Flow: moving areas too
+constexpr inline auto DLSSNR_MOTION_DEF         = DLSSNR_MOTION_OPTICALFLOW;
 
 struct VPEnableFormats_t {
 	bool bNV12;
@@ -158,10 +167,15 @@ struct Settings_t {
 	int  iDlssNRLocalStructure;
 	int  iDlssNRSkinStructure;
 	bool bDlssNRAutoMask;
-	// The network blends with its own previous output. Without motion vectors
-	// that history is misaligned on anything that moves, which shows up as a
-	// luminance shimmer -- so history is off by default.
+	// The network blends with its own previous output, which does not follow the
+	// motion of the video; left alone, that blend measures the same as no history.
 	bool bDlssNRNoHistory;
+	// Temporal stabilizer after the network, DLSSNR_STAB_*; 0 = off.
+	int  iDlssNRStabilizer;
+	// Its motion source, DLSSNR_MOTION_*.
+	int  iDlssNRMotion;
+	// Optical Flow vectors given to the network as DLSSNR.MVec as well.
+	bool bDlssNRMotionVectors;
 	// Run the pass at display resolution, after scaling, instead of at source
 	// resolution before it. Much heavier at 4K.
 	bool bDlssNRAfterUpscale;
@@ -231,10 +245,34 @@ struct Settings_t {
 		bDlssNRAutoMask                 = true;
 		bDlssNRNoHistory                = false;
 		bDlssNRAfterUpscale             = false;
+		iDlssNRStabilizer               = DLSSNR_STAB_DEF;
+		iDlssNRMotion                   = DLSSNR_MOTION_DEF;
+		bDlssNRMotionVectors            = false;
 		iDlssNRToggleKey                = VK_F12;
 		szDlssNRDllPath[0]              = L'\0';
 	}
 };
+
+// Every DLSS 5 field, for the property pages that must not overwrite each
+// other: the main page takes these from the renderer before applying.
+inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
+{
+	dst.bDlssNR               = src.bDlssNR;
+	dst.iDlssNRStyle          = src.iDlssNRStyle;
+	dst.iDlssNRPreset         = src.iDlssNRPreset;
+	dst.iDlssNRIntensity      = src.iDlssNRIntensity;
+	dst.iDlssNRLocalTone      = src.iDlssNRLocalTone;
+	dst.iDlssNRLocalStructure = src.iDlssNRLocalStructure;
+	dst.iDlssNRSkinStructure  = src.iDlssNRSkinStructure;
+	dst.bDlssNRAutoMask       = src.bDlssNRAutoMask;
+	dst.bDlssNRNoHistory      = src.bDlssNRNoHistory;
+	dst.iDlssNRStabilizer     = src.iDlssNRStabilizer;
+	dst.iDlssNRMotion         = src.iDlssNRMotion;
+	dst.bDlssNRMotionVectors  = src.bDlssNRMotionVectors;
+	dst.bDlssNRAfterUpscale   = src.bDlssNRAfterUpscale;
+	dst.iDlssNRToggleKey      = src.iDlssNRToggleKey;
+	wcscpy_s(dst.szDlssNRDllPath, src.szDlssNRDllPath);
+}
 
 interface __declspec(uuid("1AB00F10-5F55-42AC-B53F-38649F11BE3E"))
 IVideoRenderer : public IUnknown {

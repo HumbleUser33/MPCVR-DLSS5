@@ -27,3 +27,11 @@ _nvngx.dll
 
 # Personal Claude Code permission grants
 /.claude/settings.local.json
+
+# NVIDIA Optical Flow SDK 5.0: DesignWorks licence, local reference only
+/external/nvof-sdk/
+/Optical_Flow_SDK_*/
+/tools/dlssnr_probe/temporal_results*.txt
+/tools/dlssnr_probe/*.cso
+/tools/dlssnr_probe/*.res
+/tools/dlssnr_probe/effect_*.png

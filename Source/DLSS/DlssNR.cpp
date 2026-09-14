@@ -33,10 +33,10 @@
 static const wchar_t s_SnippetName[] = L"nvngx_dlssnr.dll";
 static const wchar_t s_ShimName[]    = L"nvngx.dll";
 
-// The snippet's parameter keys. Depth, MVec, ControlMask, UI, UIAlpha and
-// BidirectionalDistortionField are deliberately never set: for video there is
-// no depth and no motion. The DLL's own log confirms it runs that way --
-// "EvaluateFeature Color=... MVec=0000000000000000 Depth=0000000000000000".
+// The snippet's parameter keys. UI, UIAlpha and BidirectionalDistortionField are
+// never set. MVec, Depth and ControlMask are optional guides (SetGuides): without
+// them the DLL logs "EvaluateFeature Color=... MVec=0000000000000000
+// Depth=0000000000000000" and runs on colour alone.
 #define P_WIDTH        "DLSSNR.Width"
 #define P_HEIGHT       "DLSSNR.Height"
 #define P_ENABLED      "DLSSNR.Enabled"
@@ -56,6 +56,9 @@ static const wchar_t s_ShimName[]    = L"nvngx.dll";
 #define P_COLOR        "DLSSNR.Color"
 #define P_OUTPUT       "DLSSNR.Output"
 #define P_BACKBUFFER   "DLSSNR.Backbuffer"
+#define P_MVEC         "DLSSNR.MVec"
+#define P_DEPTH        "DLSSNR.Depth"
+#define P_CONTROLMASK  "DLSSNR.ControlMask"
 
 const wchar_t* NgxResultName(NVSDK_NGX_Result r)
 {
@@ -707,6 +710,13 @@ void CDlssNR::Shutdown()
 
 	m_pTex12In.Release();
 	m_pTex12Out.Release();
+	// Guides were opened on the device about to go away; a later Init must not
+	// mistake them for still-valid resources.
+	m_GuideMVec = {};
+	m_GuideDepth = {};
+	m_GuideMask = {};
+	m_fMVecScaleX = 1.0f;
+	m_fMVecScaleY = 1.0f;
 	m_pFenceUp11.Release();
 	m_pFenceUp12.Release();
 	m_pFenceDown12.Release();
@@ -841,6 +851,120 @@ bool CDlssNR::CheckDeviceLost()
 	return true;
 }
 
+// Opens a D3D11 texture on the private D3D12 device through an NT handle. Each
+// step names itself on failure: "could not share textures" on its own was
+// useless to diagnose.
+bool CDlssNR::OpenOnD3D12(const wchar_t* which, ID3D11Texture2D* pTex11, CComPtr<ID3D12Resource>& out)
+{
+	out.Release();
+
+	D3D11_TEXTURE2D_DESC td = {};
+	pTex11->GetDesc(&td);
+	if (!(td.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)) {
+		m_DetailError = std::format(L"{} texture has no share handle (misc 0x{:X})", which, td.MiscFlags);
+		Log(L"%s", m_DetailError.c_str());
+		return false;
+	}
+
+	CComPtr<IDXGIResource1> pRes1;
+	HRESULT hr = pTex11->QueryInterface(IID_PPV_ARGS(&pRes1));
+	if (FAILED(hr)) {
+		m_DetailError = std::format(L"{}: no IDXGIResource1 (0x{:08X})", which, (unsigned)hr);
+		Log(L"%s", m_DetailError.c_str());
+		return false;
+	}
+
+	HANDLE h11 = nullptr;
+	hr = pRes1->CreateSharedHandle(nullptr,
+			DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &h11);
+	if (FAILED(hr) || !h11) {
+		m_DetailError = std::format(L"{}: CreateSharedHandle failed (0x{:08X})", which, (unsigned)hr);
+		Log(L"%s", m_DetailError.c_str());
+		return false;
+	}
+
+	hr = m_pDev12->OpenSharedHandle(h11, IID_PPV_ARGS(&out));
+	CloseHandle(h11);
+	if (FAILED(hr)) {
+		m_DetailError = std::format(L"{}: OpenSharedHandle failed (0x{:08X})", which, (unsigned)hr);
+		Log(L"%s", m_DetailError.c_str());
+		return false;
+	}
+	return true;
+}
+
+bool CDlssNR::SetGuideSlot(GuideSlot& slot, const wchar_t* which, ID3D11Texture2D* pTex11)
+{
+	if (!pTex11) {
+		slot = {};
+		return true;
+	}
+	if (slot.p11 == pTex11 && slot.p12) {
+		return true;
+	}
+
+	slot = {};
+	if (!OpenOnD3D12(which, pTex11, slot.p12)) {
+		return false;
+	}
+	D3D11_TEXTURE2D_DESC td = {};
+	pTex11->GetDesc(&td);
+	slot.p11 = pTex11;
+	slot.w = td.Width;
+	slot.h = td.Height;
+	return true;
+}
+
+// Guides can be set before or after the feature exists. They go into the
+// parameter block straight away, so a CreateFeature that follows sees them too.
+bool CDlssNR::SetGuides(const Guides& g)
+{
+	if (!m_pDev12) {
+		return false;
+	}
+
+	const bool ok = SetGuideSlot(m_GuideMVec, L"motion vectors", g.pMVec)
+		&& SetGuideSlot(m_GuideDepth, L"depth", g.pDepth)
+		&& SetGuideSlot(m_GuideMask, L"control mask", g.pControlMask);
+	if (!ok) {
+		m_GuideMVec = {};
+		m_GuideDepth = {};
+		m_GuideMask = {};
+	}
+	m_fMVecScaleX = g.fMVecScaleX;
+	m_fMVecScaleY = g.fMVecScaleY;
+
+	if (m_pParams) {
+		PushGuideParams(m_pParams);
+	}
+	return ok;
+}
+
+void CDlssNR::PushGuideParams(NVSDK_NGX_Parameter* p)
+{
+	struct Entry { const char* key; const char* subrect; const GuideSlot& slot; };
+	const Entry entries[] = {
+		{ P_MVEC,        "DLSSNR.MVecSubrect",        m_GuideMVec },
+		{ P_DEPTH,       "DLSSNR.DepthSubrect",       m_GuideDepth },
+		{ P_CONTROLMASK, "DLSSNR.ControlMaskSubrect", m_GuideMask },
+	};
+
+	for (const Entry& e : entries) {
+		// Absent is a null resource rather than a missing key: a pointer set on
+		// an earlier frame must not linger in the block.
+		p->Set(e.key, (ID3D12Resource*)e.slot.p12.p);
+		if (e.slot.p12) {
+			char name[64];
+			sprintf_s(name, "%sBaseX", e.subrect);  p->Set(name, (unsigned int)0);
+			sprintf_s(name, "%sBaseY", e.subrect);  p->Set(name, (unsigned int)0);
+			sprintf_s(name, "%sWidth", e.subrect);  p->Set(name, (unsigned int)e.slot.w);
+			sprintf_s(name, "%sHeight", e.subrect); p->Set(name, (unsigned int)e.slot.h);
+		}
+	}
+	p->Set(P_MVECSCALEX, m_fMVecScaleX);
+	p->Set(P_MVECSCALEY, m_fMVecScaleY);
+}
+
 bool CDlssNR::CreateFeature(ID3D11Texture2D* pShared11In, ID3D11Texture2D* pShared11Out,
                             UINT w, UINT h, const Params& p)
 {
@@ -862,45 +986,7 @@ bool CDlssNR::CreateFeature(ID3D11Texture2D* pShared11In, ID3D11Texture2D* pShar
 	// Open the renderer's textures on the D3D12 side. They were created with
 	// Tex2D_DefaultShaderRTargetUAVShared, so they carry an NT share handle and
 	// the UAV bind flag NGX needs for its output.
-	// Each step names itself on failure: "could not share textures" on its own
-	// was useless to diagnose.
-	auto open12 = [&](const wchar_t* which, ID3D11Texture2D* pTex11, CComPtr<ID3D12Resource>& out) -> bool {
-		D3D11_TEXTURE2D_DESC td = {};
-		pTex11->GetDesc(&td);
-		if (!(td.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)) {
-			m_DetailError = std::format(L"{} texture has no share handle (misc 0x{:X})", which, td.MiscFlags);
-			Log(L"%s", m_DetailError.c_str());
-			return false;
-		}
-
-		CComPtr<IDXGIResource1> pRes1;
-		HRESULT hr = pTex11->QueryInterface(IID_PPV_ARGS(&pRes1));
-		if (FAILED(hr)) {
-			m_DetailError = std::format(L"{}: no IDXGIResource1 (0x{:08X})", which, (unsigned)hr);
-			Log(L"%s", m_DetailError.c_str());
-			return false;
-		}
-
-		HANDLE h11 = nullptr;
-		hr = pRes1->CreateSharedHandle(nullptr,
-				DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &h11);
-		if (FAILED(hr) || !h11) {
-			m_DetailError = std::format(L"{}: CreateSharedHandle failed (0x{:08X})", which, (unsigned)hr);
-			Log(L"%s", m_DetailError.c_str());
-			return false;
-		}
-
-		hr = m_pDev12->OpenSharedHandle(h11, IID_PPV_ARGS(&out));
-		CloseHandle(h11);
-		if (FAILED(hr)) {
-			m_DetailError = std::format(L"{}: OpenSharedHandle failed (0x{:08X})", which, (unsigned)hr);
-			Log(L"%s", m_DetailError.c_str());
-			return false;
-		}
-		return true;
-	};
-
-	if (!open12(L"input", pShared11In, m_pTex12In) || !open12(L"output", pShared11Out, m_pTex12Out)) {
+	if (!OpenOnD3D12(L"input", pShared11In, m_pTex12In) || !OpenOnD3D12(L"output", pShared11Out, m_pTex12Out)) {
 		m_State = State::ShareFailed;
 		return false;
 	}
@@ -972,8 +1058,7 @@ void CDlssNR::PushEvaluateParams(NVSDK_NGX_Parameter* p, const Params& s, bool b
 	p->Set(P_UICORRECTION, (int)0);
 	p->Set(P_DEPTHINV, (int)1);
 	p->Set(P_SCALINGRATIO, 1.0f);
-	p->Set(P_MVECSCALEX, 1.0f);
-	p->Set(P_MVECSCALEY, 1.0f);
+	PushGuideParams(p);
 
 	p->Set(P_COLOR,      (ID3D12Resource*)m_pTex12In);
 	p->Set(P_OUTPUT,     (ID3D12Resource*)m_pTex12Out);
@@ -1079,6 +1164,7 @@ std::wstring CDlssNR::GetInfoBlock() const
 	s += std::format(L"  Transport : Direct3D 12 interop{}\n", m_bUseShim ? L", nvngx.dll shim" : L"");
 	s += std::format(L"  Arch      : {}\n", m_bArchOverride ? L"reported as Blackwell" : L"as reported by the driver");
 	s += std::format(L"  State     : {}\n", GetStatusLine());
+	s += std::format(L"  Guides    : {}\n", m_GuideMask.p12 ? L"ControlMask (temporal stabilizer)" : L"none");
 
 	if (m_bHaveReq) {
 		s += std::format(L"  Reported  : supported=0x{:X} minArch=0x{:X}", m_ReqSupported, m_ReqMinArch);

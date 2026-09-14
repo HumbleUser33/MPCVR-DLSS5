@@ -137,6 +137,25 @@ public:
 	// Next Evaluate will set DLSSNR.Reset -- call on seek/flush.
 	void RequestReset() { m_bResetPending = true; }
 
+	// Optional guide inputs, pushed on every Evaluate. Each texture needs an NT
+	// share handle (Tex2D_DefaultShaderRTargetUAVShared) and should match the
+	// feature size; a null pointer means "not provided".
+	//   pMVec         RG16F, per-pixel motion from the current frame to the
+	//                 previous one, multiplied by fMVecScaleX/Y
+	//   pDepth        R32F
+	//   pControlMask  R8 -- a private snippet input whose meaning is measured, not
+	//                 documented anywhere
+	struct Guides {
+		ID3D11Texture2D* pMVec        = nullptr;
+		ID3D11Texture2D* pDepth       = nullptr;
+		ID3D11Texture2D* pControlMask = nullptr;
+		float fMVecScaleX = 1.0f;
+		float fMVecScaleY = 1.0f;
+	};
+	bool SetGuides(const Guides& g);   // false if a texture could not be shared
+	bool HasMotionVectors() const { return m_GuideMVec.p12 != nullptr; }
+	bool HasControlMask() const { return m_GuideMask.p12 != nullptr; }
+
 	bool IsInitialised() const { return m_bInitialised; }
 	bool IsFeatureReady() const { return m_pFeature != nullptr; }
 	bool MatchesFeature(UINT w, UINT h, int preset) const {
@@ -221,6 +240,22 @@ private:
 	// swapped its textures out from under us.
 	ID3D11Texture2D* m_pShared11In  = nullptr;
 	ID3D11Texture2D* m_pShared11Out = nullptr;
+
+	// Optional guide inputs, shared the same way as the colour pair.
+	struct GuideSlot {
+		CComPtr<ID3D12Resource> p12;
+		ID3D11Texture2D* p11 = nullptr;   // identity only, never dereferenced
+		UINT w = 0, h = 0;
+	};
+	GuideSlot m_GuideMVec;
+	GuideSlot m_GuideDepth;
+	GuideSlot m_GuideMask;
+	float m_fMVecScaleX = 1.0f;
+	float m_fMVecScaleY = 1.0f;
+
+	bool OpenOnD3D12(const wchar_t* which, ID3D11Texture2D* pTex11, CComPtr<ID3D12Resource>& out);
+	bool SetGuideSlot(GuideSlot& slot, const wchar_t* which, ID3D11Texture2D* pTex11);
+	void PushGuideParams(NVSDK_NGX_Parameter* p);
 
 	// Two shared fences, one per direction. Each pair is a single fence object
 	// seen from both devices.

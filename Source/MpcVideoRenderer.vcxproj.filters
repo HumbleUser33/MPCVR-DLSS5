@@ -42,7 +42,19 @@
     <ClCompile Include="DX9VideoProcessor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DLSS\DlssMotionMask.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DLSS\DlssNR.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DLSS\DlssPropPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DLSS\DlssOpticalFlow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DLSS\DlssStabilizer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DX11VideoProcessor.cpp">
@@ -150,6 +162,21 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\DlssNR.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DlssPropPage.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DlssOpticalFlow.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DlssStabilizer.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\NGXTypes.h">

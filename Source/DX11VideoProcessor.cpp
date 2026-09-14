@@ -426,6 +426,9 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_DlssParams           = DlssParamsFromSettings(config);
 	m_strDlssNRDllPath     = config.szDlssNRDllPath;
 	m_bDlssNRAfterUpscale  = config.bDlssNRAfterUpscale;
+	m_iDlssNRStabilizer    = config.iDlssNRStabilizer;
+	m_iDlssNRMotion        = config.iDlssNRMotion;
+	m_bDlssNRMotionVectors = config.bDlssNRMotionVectors;
 
 	m_nCurrentAdapter = -1;
 
@@ -686,6 +689,8 @@ void CDX11VideoProcessor::ReleaseVP()
 	m_TexDlssIn.Release();
 	m_TexDlssOut.Release();
 	m_DlssNR.ReleaseFeature();
+	m_DlssNR.SetGuides(CDlssNR::Guides{}); // before the shared motion vectors go away
+	m_DlssStabilizer.Release();
 
 	m_PSConvColorData.Release();
 	m_pDoviCurvesConstantBuffer.Release();
@@ -2647,6 +2652,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 
 	if (field) {
 		m_FieldDrawn = field;
+		m_bDlssNewPicture = true; // not a redraw: the stabilizer may advance
 	}
 
 	CComPtr<ID3D11Texture2D> pBackBuffer;
@@ -2970,7 +2976,17 @@ void CDX11VideoProcessor::UpdateTexures()
 			m_TexDlssIn.Release();
 			m_TexDlssOut.Release();
 			m_DlssNR.ReleaseFeature();
+			m_DlssNR.SetGuides(CDlssNR::Guides{}); // before the shared motion vectors go away
+			m_DlssStabilizer.Release();
 			return;
+		}
+
+		// The stabilizer follows the working size, and motion vectors of another
+		// size must not sit in the parameter block when the feature is created.
+		// DlssNRPass makes a new one.
+		if (m_DlssStabilizer.IsCreated() && !m_DlssStabilizer.Matches(w, h, DlssMotionSource())) {
+			m_DlssNR.SetGuides(CDlssNR::Guides{});
+			m_DlssStabilizer.Release();
 		}
 
 		// Both textures are shared with the private D3D12 device, so the input
@@ -3001,11 +3017,15 @@ void CDX11VideoProcessor::UpdateTexures()
 		if (!m_bDlssNRActive) {
 			m_TexDlssIn.Release();
 			m_TexDlssOut.Release();
+			m_DlssNR.SetGuides(CDlssNR::Guides{}); // before the shared motion vectors go away
+			m_DlssStabilizer.Release();
 		}
 	} else {
 		m_TexDlssIn.Release();
 		m_TexDlssOut.Release();
 		m_DlssNR.ReleaseFeature();
+		m_DlssNR.SetGuides(CDlssNR::Guides{});
+		m_DlssStabilizer.Release();
 	}
 }
 
@@ -3408,7 +3428,13 @@ std::wstring CDX11VideoProcessor::GetDlssStatus()
 	if (!DlssNRSupportedHere()) {
 		return L"not available on this adapter";
 	}
-	return m_DlssNR.GetStatusLine();
+	// The page cannot show the statistics, so it says which motion the stabilizer
+	// really uses: Optical Flow may have given way to the detector.
+	std::wstring status = m_DlssNR.GetStatusLine();
+	if (m_iDlssNRStabilizer > 0 && m_DlssStabilizer.IsCreated()) {
+		status += L"; stabilizer: " + m_DlssStabilizer.GetStatusLine();
+	}
+	return status;
 }
 
 bool CDX11VideoProcessor::DlssNRSupportedHere() const
@@ -3482,6 +3508,51 @@ HRESULT CDX11VideoProcessor::DlssNRPass(Tex2D_t* pInputTexture, const CRect& rSr
 		return hr;
 	}
 
+	// The stabilizer steadies the network's effect after it runs; DLSSNR.ControlMask
+	// strips the effect instead (tools/dlssnr_probe --teffect). Motion is measured
+	// on new pictures only, and a redraw is steadied against the same history again.
+	bool bStabilize = false;
+	if (m_iDlssNRStabilizer > 0) {
+		const CDlssStabilizer::Motion motion = DlssMotionSource();
+		if (!m_DlssStabilizer.Matches(w, h, motion)) {
+			const bool bWasCreated = m_DlssStabilizer.IsCreated();
+			if (m_DlssNR.HasMotionVectors()) {
+				m_DlssNR.SetGuides(CDlssNR::Guides{}); // before the old vectors go away
+			}
+			const HRESULT hrStab = m_DlssStabilizer.Create(m_pDevice, m_pDeviceContext, w, h, motion,
+				m_pVSimpleInputLayout, m_pVS_Simple, m_pSamplerPoint, m_pSamplerLinear);
+			if (SUCCEEDED(hrStab)) {
+				m_bDlssNewPicture = true; // a new stabilizer has to see this picture
+			}
+			if (SUCCEEDED(hrStab) || bWasCreated) {
+				UpdateStatsStatic();
+			}
+		}
+		bStabilize = m_DlssStabilizer.IsCreated();
+	} else if (m_DlssStabilizer.IsCreated()) {
+		m_DlssNR.SetGuides(CDlssNR::Guides{});
+		m_DlssStabilizer.Release();
+		UpdateStatsStatic();
+	}
+
+	const bool bNewPicture = m_bDlssNewPicture;
+	m_bDlssNewPicture = false;
+	if (bStabilize && bNewPicture) {
+		const CDlssStabilizer::Motion active = m_DlssStabilizer.ActiveMotion();
+		m_DlssStabilizer.PrepareMotion(m_pDeviceContext, m_TexDlssIn.pShaderResource);
+		if (m_DlssStabilizer.ActiveMotion() != active) {
+			UpdateStatsStatic(); // Optical Flow gave way to the detector
+		}
+	}
+
+	// The Optical Flow vectors reach the network as well when asked for.
+	ID3D11Texture2D* pVectors = (bStabilize && m_bDlssNRMotionVectors) ? m_DlssStabilizer.GetMotionVectors() : nullptr;
+	if ((pVectors != nullptr) != m_DlssNR.HasMotionVectors()) {
+		CDlssNR::Guides guides;
+		guides.pMVec = pVectors;
+		m_DlssNR.SetGuides(guides);
+	}
+
 	// Unbind before handing the textures to the other device.
 	ID3D11ShaderResourceView* nullSRVs[4] = {};
 	m_pDeviceContext->PSSetShaderResources(0, std::size(nullSRVs), nullSRVs);
@@ -3494,7 +3565,13 @@ HRESULT CDX11VideoProcessor::DlssNRPass(Tex2D_t* pInputTexture, const CRect& rSr
 		return E_FAIL;
 	}
 
-	*ppResult = &m_TexDlssOut;
+	if (bStabilize) {
+		m_DlssStabilizer.Stabilize(m_pDeviceContext, m_TexDlssIn.pShaderResource, m_TexDlssOut.pShaderResource,
+			(float)m_iDlssNRStabilizer / DLSSNR_STAB_MAX, bNewPicture);
+		*ppResult = m_DlssStabilizer.GetResult();
+	} else {
+		*ppResult = &m_TexDlssOut;
+	}
 	return S_OK;
 }
 
@@ -4086,6 +4163,11 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 			changeDlssFeature = true;
 		}
 		m_DlssParams = newParams;
+		// Nor does the stabilizer: DlssNRPass creates, changes or drops it on
+		// the next picture.
+		m_iDlssNRStabilizer    = config.iDlssNRStabilizer;
+		m_iDlssNRMotion        = config.iDlssNRMotion;
+		m_bDlssNRMotionVectors = config.bDlssNRMotionVectors;
 
 		// Only a different DLL justifies tearing the whole session down.
 		if (m_strDlssNRDllPath != config.szDlssNRDllPath) {
@@ -4383,6 +4465,7 @@ void CDX11VideoProcessor::Flush()
 
 	m_rtStart = 0;
 	m_DlssNR.RequestReset();
+	m_DlssStabilizer.Reset();
 
 	m_DoviExtensionMetadata = {};
 #ifndef NDEBUG
@@ -4557,6 +4640,11 @@ void CDX11VideoProcessor::UpdateStatsStatic()
 				style, m_DlssParams.iPreset, m_DlssParams.fIntensity, m_DlssParams.fLocalTone,
 				m_DlssParams.fLocalStructure, m_DlssParams.fSkinStructure,
 				m_DlssParams.bUseAutoMask ? L" auto" : L"");
+			if (m_iDlssNRStabilizer > 0) {
+				m_strStatsVProc += std::format(L"\nStabilizer    : {}, {}{}", m_iDlssNRStabilizer,
+					m_DlssStabilizer.IsCreated() ? m_DlssStabilizer.GetStatusLine() : std::wstring(L"not started"),
+					(m_bDlssNRMotionVectors && m_DlssStabilizer.GetMotionVectors()) ? L", vectors to DLSS" : L"");
+			}
 		} else {
 			m_strStatsVProc += std::format(L"\nDLSS 5 NR     : {}", m_DlssNR.GetStatusLine());
 		}

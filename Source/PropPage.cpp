@@ -1,4 +1,4 @@
-﻿/*
+/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -22,8 +22,6 @@
 #include "resource.h"
 #include "Helper.h"
 #include "DisplayConfig.h"
-#include <commdlg.h>
-#include "../Include/FilterInterfaces.h"
 #include "PropPage.h"
 
 void SetCursor(HWND hWnd, LPCWSTR lpCursorName)
@@ -83,30 +81,10 @@ CVRMainPPage::~CVRMainPPage()
 	DLog(L"~CVRMainPPage()");
 }
 
-// The DLSS strengths are stored x100; show them as 1.00 next to the slider.
-static void SetDlssStrength(HWND hWnd, int idSlider, int idEdit, int value)
-{
-	::SendDlgItemMessageW(hWnd, idSlider, TBM_SETPOS, TRUE, (LPARAM)value);
-	::SetDlgItemTextW(hWnd, idEdit, std::format(L"{:.2f}", (float)value / DLSSNR_STR_SCALE).c_str());
-}
-
 void CVRMainPPage::SetControls()
 {
 	CheckDlgButton(IDC_CHECK1, m_SetsPP.bUseD3D11             ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK2, m_SetsPP.bShowStats            ? BST_CHECKED : BST_UNCHECKED);
-
-	CheckDlgButton(IDC_CHECK20, m_SetsPP.bDlssNR         ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_CHECK21, m_SetsPP.bDlssNRAutoMask    ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_CHECK22, m_SetsPP.bDlssNRNoHistory   ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_CHECK23, m_SetsPP.bDlssNRAfterUpscale? BST_CHECKED : BST_UNCHECKED);
-	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO11, m_SetsPP.iDlssNRStyle);
-	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO12, m_SetsPP.iDlssNRPreset);
-	SetDlssStrength(m_hWnd, IDC_SLIDER3, IDC_EDIT3, m_SetsPP.iDlssNRIntensity);
-	SetDlssStrength(m_hWnd, IDC_SLIDER4, IDC_EDIT4, m_SetsPP.iDlssNRLocalTone);
-	SetDlssStrength(m_hWnd, IDC_SLIDER5, IDC_EDIT5, m_SetsPP.iDlssNRLocalStructure);
-	SetDlssStrength(m_hWnd, IDC_SLIDER6, IDC_EDIT6, m_SetsPP.iDlssNRSkinStructure);
-	SetDlgItemTextW(IDC_EDIT7, m_SetsPP.szDlssNRDllPath);
-	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO13, m_SetsPP.iDlssNRToggleKey);
 
 	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO1, m_SetsPP.iTexFormat);
 
@@ -159,25 +137,6 @@ void CVRMainPPage::SetControls()
 
 void CVRMainPPage::EnableControls()
 {
-	{
-		// The path box stays live even when the feature is off, so a wrong path
-		// can be fixed without enabling it first.
-		const BOOL bD3D11 = m_SetsPP.bUseD3D11;
-		const BOOL bOn    = bD3D11 && m_SetsPP.bDlssNR;
-		GetDlgItem(IDC_CHECK20).EnableWindow(bD3D11);
-		GetDlgItem(IDC_EDIT7).EnableWindow(bD3D11);
-		GetDlgItem(IDC_BUTTON2).EnableWindow(bD3D11);
-		GetDlgItem(IDC_COMBO13).EnableWindow(bD3D11);
-		GetDlgItem(IDC_STATIC29).EnableWindow(bD3D11);
-		for (const int id : { IDC_CHECK21, IDC_CHECK22, IDC_CHECK23, IDC_COMBO11, IDC_COMBO12,
-				IDC_SLIDER3, IDC_SLIDER4, IDC_SLIDER5, IDC_SLIDER6,
-				IDC_EDIT3, IDC_EDIT4, IDC_EDIT5, IDC_EDIT6,
-				IDC_STATIC21, IDC_STATIC22, IDC_STATIC23, IDC_STATIC24,
-				IDC_STATIC25, IDC_STATIC26 }) {
-			GetDlgItem(id).EnableWindow(bOn);
-		}
-	}
-
 	if (!IsWindows8OrGreater()) { // Windows 7
 		const BOOL bEnable = !m_SetsPP.bUseD3D11;
 		GetDlgItem(IDC_STATIC1).EnableWindow(bEnable); // not working for GROUPBOX
@@ -268,61 +227,7 @@ HRESULT CVRMainPPage::OnActivate()
 	GetDlgItem(IDC_STATIC7).EnableWindow(FALSE);
 	GetDlgItem(IDC_COMBO8).EnableWindow(FALSE);
 	GetDlgItem(IDC_CHECK19).EnableWindow(FALSE);
-	// The DLSS 5 NR snippet is x64 only.
-	for (const int id : { IDC_STATIC20, IDC_CHECK20, IDC_CHECK21, IDC_CHECK22, IDC_CHECK23,
-			IDC_COMBO11, IDC_COMBO12,
-			IDC_SLIDER3, IDC_SLIDER4, IDC_SLIDER5, IDC_SLIDER6,
-			IDC_EDIT3, IDC_EDIT4, IDC_EDIT5, IDC_EDIT6, IDC_EDIT7, IDC_BUTTON2,
-			IDC_COMBO13, IDC_STATIC29,
-			IDC_STATIC21, IDC_STATIC22, IDC_STATIC23, IDC_STATIC24,
-			IDC_STATIC25, IDC_STATIC26, IDC_STATIC27 }) {
-		GetDlgItem(id).EnableWindow(FALSE);
-	}
 #endif
-
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO11, L"Default",   DLSSNR_STYLE_Default);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO11, L"Natural",   DLSSNR_STYLE_Natural);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO11, L"Cinematic", DLSSNR_STYLE_Cinematic);
-	// Keys that players rarely bind to anything destructive. The hook swallows
-	// whichever one is chosen, so it must not be something the player needs.
-	static const struct { const wchar_t* name; int vk; } dlssKeys[] = {
-		{ L"None", 0 }, { L"Home", VK_HOME }, { L"End", VK_END },
-		{ L"Insert", VK_INSERT }, { L"Delete", VK_DELETE },
-		{ L"Page Up", VK_PRIOR }, { L"Page Down", VK_NEXT },
-		{ L"Pause", VK_PAUSE }, { L"Scroll Lock", VK_SCROLL },
-		{ L"F9", VK_F9 }, { L"F10", VK_F10 }, { L"F11", VK_F11 }, { L"F12", VK_F12 },
-	};
-	for (const auto& k : dlssKeys) {
-		ComboBox_AddStringData(m_hWnd, IDC_COMBO13, k.name, k.vk);
-	}
-
-	for (int i = 0; i < DLSSNR_PRESET_COUNT; i++) {
-		ComboBox_AddStringData(m_hWnd, IDC_COMBO12, std::format(L"Preset {}", i).c_str(), i);
-	}
-
-	for (const int id : { IDC_SLIDER3, IDC_SLIDER4, IDC_SLIDER5 }) {
-		SendDlgItemMessageW(id, TBM_SETRANGE, 0, MAKELONG(DLSSNR_STR_MIN, DLSSNR_STR_MAX));
-		SendDlgItemMessageW(id, TBM_SETTIC, 0, DLSSNR_STR_DEF);
-		SendDlgItemMessageW(id, TBM_SETLINESIZE, 0, 1);
-		SendDlgItemMessageW(id, TBM_SETPAGESIZE, 0, 10);
-	}
-	SendDlgItemMessageW(IDC_SLIDER6, TBM_SETRANGE, 0, MAKELONG(DLSSNR_SKIN_MIN, DLSSNR_STR_MAX));
-	SendDlgItemMessageW(IDC_SLIDER6, TBM_SETTIC, 0, DLSSNR_STR_DEF);
-	SendDlgItemMessageW(IDC_SLIDER6, TBM_SETLINESIZE, 0, 1);
-	SendDlgItemMessageW(IDC_SLIDER6, TBM_SETPAGESIZE, 0, 10);
-
-	{
-		// Show whether the snippet actually came up, and why not if it did not.
-		std::wstring status;
-		if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
-			LPWSTR pstr = nullptr;
-			if (S_OK == pIExFilterConfig->Flt_GetString("dlssStatus", &pstr, nullptr) && pstr) {
-				status = pstr;
-				CoTaskMemFree(pstr);
-			}
-		}
-		SetDlgItemTextW(IDC_STATIC28, status.empty() ? L"" : (L"DLSS: " + status).c_str());
-	}
 
 	EnableControls();
 
@@ -418,33 +323,6 @@ HRESULT CVRMainPPage::OnActivate()
 	AddHint(IDC_COMBO4,
 		L"'Flip' is more efficient, but 'Discard' may work\n"
 		"more correctly in some rare situations.");
-
-	AddHint(IDC_CHECK20,
-		L"Available for Direct3D 11, x64, NVIDIA only.\n"
-		"Requires nvngx_dlssnr.dll. Runs the network on a private\n"
-		"Direct3D 12 device; the renderer itself stays Direct3D 11.\n"
-		"Forces 16-bit float internal textures and uses about\n"
-		"500 MB of video memory at 1080p.");
-	AddHint(IDC_COMBO12,
-		L"This DLL build ships a single network, so every preset\n"
-		"falls back to the same one. Kept for other builds.");
-	AddHint(IDC_EDIT7,
-		L"Path to nvngx_dlssnr.dll.\n"
-		"Leave empty to look next to the filter, then one and two\n"
-		"directories up.");
-	AddHint(IDC_CHECK22,
-		L"The network blends each frame with its own previous output.\n"
-		"Video has no motion vectors to align that history with, so on\n"
-		"moving content the mismatch shows up as a luminance shimmer.\n"
-		"Leave this on unless you want to compare.");
-	AddHint(IDC_COMBO13,
-		L"Toggles DLSS during playback without opening this page.\n"
-		"The filter swallows this key, so pick one the player does\n"
-		"not need. Set to None to disable the shortcut.");
-	AddHint(IDC_CHECK23,
-		L"Run the network on the scaled image instead of the source.\n"
-		"Much heavier: at 4K output it works on roughly four times the\n"
-		"pixels, and its working set grows with them.");
 
 	return S_OK;
 }
@@ -552,52 +430,6 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 
-			if (nID == IDC_CHECK20) {
-				m_SetsPP.bDlssNR = IsDlgButtonChecked(IDC_CHECK20) == BST_CHECKED;
-				EnableControls();
-				SetDirty();
-				return (LRESULT)1;
-			}
-
-			if (nID == IDC_CHECK21) {
-				m_SetsPP.bDlssNRAutoMask = IsDlgButtonChecked(IDC_CHECK21) == BST_CHECKED;
-				SetDirty();
-				return (LRESULT)1;
-			}
-
-			if (nID == IDC_CHECK22) {
-				m_SetsPP.bDlssNRNoHistory = IsDlgButtonChecked(IDC_CHECK22) == BST_CHECKED;
-				SetDirty();
-				return (LRESULT)1;
-			}
-
-			if (nID == IDC_CHECK23) {
-				m_SetsPP.bDlssNRAfterUpscale = IsDlgButtonChecked(IDC_CHECK23) == BST_CHECKED;
-				SetDirty();
-				return (LRESULT)1;
-			}
-
-			if (nID == IDC_BUTTON2) {
-				wchar_t path[MAX_PATH] = {};
-				wcscpy_s(path, m_SetsPP.szDlssNRDllPath);
-
-				OPENFILENAMEW ofn = {};
-				ofn.lStructSize = sizeof(ofn);
-				ofn.hwndOwner   = m_hWnd;
-				ofn.lpstrFilter = L"NGX snippet\0nvngx_dlssnr.dll;nvngx*.dll\0DLL files (*.dll)\0*.dll\0All files (*.*)\0*.*\0\0";
-				ofn.lpstrFile   = path;
-				ofn.nMaxFile    = std::size(path);
-				ofn.lpstrTitle  = L"Select nvngx_dlssnr.dll";
-				ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-
-				if (GetOpenFileNameW(&ofn)) {
-					wcscpy_s(m_SetsPP.szDlssNRDllPath, path);
-					SetDlgItemTextW(IDC_EDIT7, m_SetsPP.szDlssNRDllPath);
-					SetDirty();
-				}
-				return (LRESULT)1;
-			}
-
 			if (nID == IDC_BUTTON1) {
 				m_SetsPP.SetDefault();
 				SetControls();
@@ -608,24 +440,6 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 		}
 
 		if (action == CBN_SELCHANGE) {
-			if (nID == IDC_COMBO11) {
-				m_SetsPP.iDlssNRStyle = ComboBox_GetCurItemData(m_hWnd, IDC_COMBO11);
-				SetDirty();
-				return (LRESULT)1;
-			}
-
-			if (nID == IDC_COMBO12) {
-				m_SetsPP.iDlssNRPreset = ComboBox_GetCurItemData(m_hWnd, IDC_COMBO12);
-				SetDirty();
-				return (LRESULT)1;
-			}
-
-			if (nID == IDC_COMBO13) {
-				m_SetsPP.iDlssNRToggleKey = (int)ComboBox_GetCurItemData(m_hWnd, IDC_COMBO13);
-				SetDirty();
-				return (LRESULT)1;
-			}
-
 			if (nID == IDC_COMBO6) {
 				lValue = SendDlgItemMessageW(IDC_COMBO6, CB_GETCURSEL, 0, 0);
 				if (lValue != m_SetsPP.iResizeStats) {
@@ -760,30 +574,6 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 			}
 			return (LRESULT)1;
 		}
-		{
-			// Strength sliders. Unlike the nits slider these are not applied on
-			// drag: pushing a settings round-trip per pixel of travel would
-			// recreate state on every mouse move.
-			const struct { int idSlider; int idEdit; int* pValue; } dlssSliders[] = {
-				{ IDC_SLIDER3, IDC_EDIT3, &m_SetsPP.iDlssNRIntensity },
-				{ IDC_SLIDER4, IDC_EDIT4, &m_SetsPP.iDlssNRLocalTone },
-				{ IDC_SLIDER5, IDC_EDIT5, &m_SetsPP.iDlssNRLocalStructure },
-				{ IDC_SLIDER6, IDC_EDIT6, &m_SetsPP.iDlssNRSkinStructure },
-			};
-			for (const auto& sl : dlssSliders) {
-				if ((HWND)lParam == GetDlgItem(sl.idSlider)) {
-					const int value = (int)SendDlgItemMessageW(sl.idSlider, TBM_GETPOS, 0, 0);
-					if (value != *sl.pValue) {
-						*sl.pValue = value;
-						SetDlgItemTextW(sl.idEdit,
-							std::format(L"{:.2f}", (float)value / DLSSNR_STR_SCALE).c_str());
-						SetDirty();
-					}
-					return (LRESULT)1;
-				}
-			}
-		}
-
 		if ((HWND)lParam == GetDlgItem(IDC_SLIDER2)) {
 			LRESULT lValue = SendDlgItemMessageW(IDC_SLIDER2, TBM_GETPOS, 0, 0);
 			lValue *= SDR_NITS_STEP;
@@ -826,9 +616,13 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	// if not error then set to m_setsPP
 	m_SetsPP.iHdrDisplayMaxNits = displayMaxNits;
 
-	// The DLL path is free text; an empty box means "locate it automatically".
-	GetDlgItemTextW(IDC_EDIT7, m_SetsPP.szDlssNRDllPath, (int)std::size(m_SetsPP.szDlssNRDllPath));
-	m_SetsPP.szDlssNRDllPath[std::size(m_SetsPP.szDlssNRDllPath) - 1] = L'\0';
+	// The DLSS 5 settings live on their own page, and the toggle key changes them
+	// while this one is open: keep what the renderer holds for them.
+	{
+		Settings_t current;
+		m_pVideoRenderer->GetSettings(current);
+		CopyDlssSettings(m_SetsPP, current);
+	}
 
 	m_pVideoRenderer->SetSettings(m_SetsPP);
 	m_pVideoRenderer->SaveSettings();

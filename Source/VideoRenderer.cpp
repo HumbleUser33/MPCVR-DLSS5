@@ -25,6 +25,7 @@
 #include <Mferror.h>
 #include "Helper.h"
 #include "PropPage.h"
+#include "DLSS/DlssPropPage.h"
 #include "VideoRendererInputPin.h"
 #include "../Include/Version.h"
 #include "VideoRenderer.h"
@@ -80,6 +81,9 @@
 #define OPT_DlssNRAfterUpscale             L"DlssNRApplyAfterUpscaling"
 #define OPT_DlssNRToggleKey                L"DlssNRToggleKey"
 #define OPT_DlssNRDllPath                  L"DlssNRDllPath"
+#define OPT_DlssNRStabilizer               L"DlssNRStabilizerStrength"
+#define OPT_DlssNRMotion                   L"DlssNRMotionSource"
+#define OPT_DlssNRMotionVectors            L"DlssNRMotionVectorsToNetwork"
 
 static std::atomic_int g_nInstance = 0;
 
@@ -321,6 +325,15 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 		}
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRAfterUpscale, dw)) {
 			m_Sets.bDlssNRAfterUpscale = !!dw;
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRStabilizer, dw)) {
+			m_Sets.iDlssNRStabilizer = discard<int>((int)dw, DLSSNR_STAB_DEF, DLSSNR_STAB_MIN, DLSSNR_STAB_MAX);
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRMotion, dw)) {
+			m_Sets.iDlssNRMotion = discard<int>((int)dw, DLSSNR_MOTION_DEF, DLSSNR_MOTION_DETECTOR, DLSSNR_MOTION_OPTICALFLOW);
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRMotionVectors, dw)) {
+			m_Sets.bDlssNRMotionVectors = !!dw;
 		}
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRToggleKey, dw)) {
 			m_Sets.iDlssNRToggleKey = discard<int>((int)dw, VK_F12, 0, 0xFF);
@@ -1357,16 +1370,29 @@ STDMETHODIMP CMpcVideoRenderer::GetPages(CAUUID* pPages)
 
 	static const GUID guidQualityPPage = { 0x565DCEF2, 0xAFC5, 0x11D2, 0x88, 0x53, 0x00, 0x00, 0xF8, 0x08, 0x83, 0xE3 };
 
-	pPages->cElems = GetActive() ? 3 : 1;
+	// Read once: the count and the list below must agree.
+	const bool bActive = GetActive();
+
+	// The DLSS 5 page follows the main one; the snippet is x64 only.
+#ifdef _WIN64
+	const ULONG nFixed = 2;
+#else
+	const ULONG nFixed = 1;
+#endif
+	pPages->cElems = nFixed + (bActive ? 2 : 0);
 	pPages->pElems = static_cast<GUID*>(CoTaskMemAlloc(sizeof(GUID) * pPages->cElems));
 	if (pPages->pElems == nullptr) {
 		return E_OUTOFMEMORY;
 	}
 
-	pPages->pElems[0] = __uuidof(CVRMainPPage);
-	if (pPages->cElems == 3) {
-		pPages->pElems[1] = __uuidof(CVRInfoPPage);
-		pPages->pElems[2] = guidQualityPPage;
+	ULONG n = 0;
+	pPages->pElems[n++] = __uuidof(CVRMainPPage);
+#ifdef _WIN64
+	pPages->pElems[n++] = __uuidof(CVRDlssPPage);
+#endif
+	if (bActive) {
+		pPages->pElems[n++] = __uuidof(CVRInfoPPage);
+		pPages->pElems[n++] = guidQualityPPage;
 	}
 
 	return S_OK;
@@ -1465,6 +1491,9 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 		key.SetDWORDValue(OPT_DlssNRAutoMask,      m_Sets.bDlssNRAutoMask);
 		key.SetDWORDValue(OPT_DlssNRNoHistory,     m_Sets.bDlssNRNoHistory);
 		key.SetDWORDValue(OPT_DlssNRAfterUpscale,  m_Sets.bDlssNRAfterUpscale);
+		key.SetDWORDValue(OPT_DlssNRStabilizer,    m_Sets.iDlssNRStabilizer);
+		key.SetDWORDValue(OPT_DlssNRMotion,        m_Sets.iDlssNRMotion);
+		key.SetDWORDValue(OPT_DlssNRMotionVectors, m_Sets.bDlssNRMotionVectors);
 		key.SetDWORDValue(OPT_DlssNRToggleKey,     m_Sets.iDlssNRToggleKey);
 		key.SetStringValue(OPT_DlssNRDllPath,      m_Sets.szDlssNRDllPath);
 #endif

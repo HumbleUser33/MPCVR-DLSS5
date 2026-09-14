@@ -6,6 +6,8 @@
 #define IDD_INFOPROPPAGE                103
 #define IDS_MAINPROPPAGE_TITLE          104
 #define IDS_INFOPROPPAGE_TITLE          105
+#define IDD_DLSSPROPPAGE                106
+#define IDS_DLSSPROPPAGE_TITLE          107
 #define IDF_DITHER_32X32_FLOAT16        401
 #define IDF_HLSL_ST2084                 501
 #define IDF_HLSL_HLG                    502
@@ -86,6 +88,13 @@
 #define IDF_PS_11_FINAL_PASS            880
 #define IDF_PS_11_FINAL_PASS_10         881
 #define IDF_PS_11_HDR10_TONEMAP         882
+#define IDF_PS_11_DLSS_MOTION_LUMA      890
+#define IDF_PS_11_DLSS_MOTION_DIFF      891
+#define IDF_PS_11_DLSS_MOTION_AGE       892
+#define IDF_PS_11_DLSS_MOTION_MASK      893
+#define IDF_PS_11_DLSS_STAB_FLOWFRAME   894
+#define IDF_PS_11_DLSS_STAB_FLOWMOTION  895
+#define IDF_PS_11_DLSS_STAB_STABILIZE   896
 #define IDF_PS_11_TEST                  900
 #define IDC_EDIT1                       1001
 #define IDC_EDIT2                       1002
@@ -159,14 +168,24 @@
 #define IDC_CHECK23                     1094
 #define IDC_COMBO13                     1095
 #define IDC_STATIC29                    1096
+#define IDC_SLIDER7                     1097
+#define IDC_EDIT8                       1098
+#define IDC_STATIC30                    1099
+#define IDC_STATIC31                    1100
+#define IDC_STATIC32                    1101
+#define IDC_STATIC33                    1102
+#define IDC_BUTTON3                     1103
+#define IDC_COMBO14                     1104
+#define IDC_CHECK24                     1105
+#define IDC_STATIC34                    1106
 
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        106
+#define _APS_NEXT_RESOURCE_VALUE        108
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1097
+#define _APS_NEXT_CONTROL_VALUE         1107
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

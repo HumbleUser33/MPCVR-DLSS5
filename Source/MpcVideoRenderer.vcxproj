@@ -71,7 +71,11 @@
     <ClCompile Include="DisplayConfig.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="DX11Helper.cpp" />
+    <ClCompile Include="DLSS\DlssMotionMask.cpp" />
     <ClCompile Include="DLSS\DlssNR.cpp" />
+    <ClCompile Include="DLSS\DlssOpticalFlow.cpp" />
+    <ClCompile Include="DLSS\DlssPropPage.cpp" />
+    <ClCompile Include="DLSS\DlssStabilizer.cpp" />
     <ClCompile Include="DX11VideoProcessor.cpp" />
     <ClCompile Include="DX9Helper.cpp" />
     <ClCompile Include="DX9VideoProcessor.cpp" />
@@ -110,6 +114,11 @@
     <ClInclude Include="DisplayConfig.h" />
     <ClInclude Include="DX11Helper.h" />
     <ClInclude Include="DLSS\DlssNR.h" />
+    <ClInclude Include="DLSS\DlssOpticalFlow.h" />
+    <ClInclude Include="DLSS\DlssPropPage.h" />
+    <ClInclude Include="DLSS\DlssStabilizer.h" />
+    <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h" />
+    <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h" />
     <ClInclude Include="DLSS\NGXTypes.h" />
     <ClInclude Include="DX11VideoProcessor.h" />
     <ClInclude Include="DX9Helper.h" />
