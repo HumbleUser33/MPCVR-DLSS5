@@ -25,6 +25,12 @@ float4 main(PS_INPUT input) : SV_Target
     float pos = input.Tex[AXIS] * wh[AXIS] - 0.5;
     float t = frac(pos); // calculate the difference between the output pixel and the original surrounding two pixels
     pos = pos - t;
+    // The weights below divide by t and by 1 - t. At an exact integer scale
+    // factor, rounding lands t on 0 or on 1 and a whole row and column come out
+    // as NaN -- 5999 pixels of a 4K frame at an exact x3, measured by
+    // tools/dlssnr_probe --tupscale. A ten-thousandth of a pixel away from
+    // either end is invisible and keeps every denominator finite.
+    t = clamp(t, 1e-4, 1. - 1e-4);
 
 #if (AXIS == 0)
     float4 Q2 = tex.Sample(samp, float2((pos + 0.5) * dxdy.x, input.Tex.y)); // nearest original pixel to the left

@@ -20,6 +20,13 @@ float4 main(float2 tex : TEXCOORD0) : COLOR
     #error ERROR: incorrect AXIS.
 #endif
 
+    // The weights below divide by t and by 1 - t. At an exact integer scale
+    // factor, rounding lands t on 0 or on 1 and a whole row and column come out
+    // as NaN -- 5999 pixels of a 4K frame at an exact x3, measured by
+    // tools/dlssnr_probe --tupscale. A ten-thousandth of a pixel away from
+    // either end is invisible and keeps every denominator finite.
+    t = clamp(t, 1e-4, 1. - 1e-4);
+
     float4 Q2 = tex2D(s0, (pos+.5)*dxdy); // nearest original pixel to the left
     if(!t) return Q2; // case t == 0. is required to return sample Q2, because of a possible division by 0.
     else {
