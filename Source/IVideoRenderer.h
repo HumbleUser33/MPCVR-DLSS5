@@ -119,6 +119,13 @@ constexpr inline auto DLSSNR_MOTION_DETECTOR    = 0;   // shader detector: still
 constexpr inline auto DLSSNR_MOTION_OPTICALFLOW = 1;   // NVIDIA Optical Flow: moving areas too
 constexpr inline auto DLSSNR_MOTION_DEF         = DLSSNR_MOTION_OPTICALFLOW;
 
+// DLSS Super Resolution render preset, stored as the NGX number: 0 lets DLSS
+// choose for the scale, 10 J and 11 K are the first transformer models, 12 L and
+// 13 M the second (DLSS 4.5).
+constexpr inline auto DLSSSR_PRESET_DEF = 0;
+constexpr inline auto DLSSSR_PRESET_J   = 10;
+constexpr inline auto DLSSSR_PRESET_M   = 13;
+
 struct VPEnableFormats_t {
 	bool bNV12;
 	bool bP01x;
@@ -182,6 +189,15 @@ struct Settings_t {
 	// Virtual-key code that toggles DLSS during playback, 0 = no key.
 	int  iDlssNRToggleKey;
 	wchar_t szDlssNRDllPath[MAX_PATH];
+	// DLSS Super Resolution in place of the Upscaling method, set on the DLSS 5
+	// page and independent of DLSS 5 NR: nvngx_dlss.dll through the display
+	// driver's NGX runtime.
+	bool bDlssSR;
+	int  iDlssSRPreset;   // DLSSSR_PRESET_*
+	wchar_t szDlssSRDllPath[MAX_PATH];
+	// Start the DLSS passes early by what they take, and hold each finished picture
+	// until its time, so DLSS does not make the video late (see CRenderAhead).
+	bool bDlssRenderAhead;
 
 	Settings_t() {
 		SetDefault();
@@ -250,11 +266,16 @@ struct Settings_t {
 		bDlssNRMotionVectors            = false;
 		iDlssNRToggleKey                = VK_F12;
 		szDlssNRDllPath[0]              = L'\0';
+		bDlssSR                         = false;
+		iDlssSRPreset                   = DLSSSR_PRESET_DEF;
+		szDlssSRDllPath[0]              = L'\0';
+		bDlssRenderAhead                = true;
 	}
 };
 
-// Every DLSS 5 field, for the property pages that must not overwrite each
-// other: the main page takes these from the renderer before applying.
+// Every field of the DLSS 5 page, DLSS Super Resolution included, for the
+// property pages that must not overwrite each other: the main page takes these
+// from the renderer before applying.
 inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 {
 	dst.bDlssNR               = src.bDlssNR;
@@ -272,6 +293,10 @@ inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 	dst.bDlssNRAfterUpscale   = src.bDlssNRAfterUpscale;
 	dst.iDlssNRToggleKey      = src.iDlssNRToggleKey;
 	wcscpy_s(dst.szDlssNRDllPath, src.szDlssNRDllPath);
+	dst.bDlssSR               = src.bDlssSR;
+	dst.iDlssSRPreset         = src.iDlssSRPreset;
+	wcscpy_s(dst.szDlssSRDllPath, src.szDlssSRDllPath);
+	dst.bDlssRenderAhead      = src.bDlssRenderAhead;
 }
 
 interface __declspec(uuid("1AB00F10-5F55-42AC-B53F-38649F11BE3E"))

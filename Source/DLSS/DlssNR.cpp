@@ -18,6 +18,7 @@
  */
 
 #include "stdafx.h"
+#include <intrin.h>
 #include <dxgi1_4.h>
 #include <shlwapi.h>
 #include <shlobj.h>
@@ -50,6 +51,9 @@ static const wchar_t s_ShimName[]    = L"nvngx.dll";
 #define P_AUTOMASK     "DLSSNR.UseAutoMask"
 #define P_UICORRECTION "DLSSNR.UICorrection"
 #define P_DEPTHINV     "DLSSNR.DepthInverted"
+// The snippet names a network size apart from the output and computes a ratio per
+// quality mode, but 310.8 answers 1 for every mode, and 0.75 or 0.5 set here run
+// in the same time to the same bit (tools/dlssnr_probe, measured 2026-09-16).
 #define P_SCALINGRATIO "DLSSNR.ScalingRatio"
 #define P_MVECSCALEX   "DLSSNR.MVecScaleX"
 #define P_MVECSCALEY   "DLSSNR.MVecScaleY"
@@ -141,21 +145,33 @@ void CNgxParameterStore::Reset() { m_map.clear(); }
 // function catches the query whenever it happens; the value reported is the
 // minimum the snippet itself declares, so nothing is invented here.
 //
-// Scope: process-wide once installed, which is why it is only installed when
-// the user turns the feature on, and left in place for the session -- the
-// snippet reads the architecture during init and caches it, so arming it only
-// around individual calls does not work (measured).
+// Scope: the hook is process-wide once installed, which is why it is only
+// installed when the user turns the feature on, and left in place for the
+// session -- the snippet reads the architecture during init and caches it, so
+// arming it only around individual calls does not work (measured).
+//
+// The answer is only changed for calls made from the DLSS 5 NR snippet itself.
+// Every NGX snippet asks the same question: DLSS Super Resolution told it was on
+// a Blackwell GPU picks kernels an Ampere or Ada card cannot run, writes nothing
+// and then removes the device (measured, tools/dlssnr_probe --tsr).
 
 namespace {
 	PFN_NvAPI_GPU_GetArchInfo g_pRealArchInfo = nullptr;
 	unsigned int g_SpoofArch = 0;
+	HMODULE g_hSpoofFor = nullptr;   // the module whose calls get the spoofed answer
 	bool g_bArchHookInstalled = false;
 
 	int __cdecl ArchInfoDetour(void* hGpu, NV_GPU_ARCH_INFO* info)
 	{
 		const int r = g_pRealArchInfo(hGpu, info);
-		if (r == 0 && info && g_SpoofArch) {
-			info->architecture = g_SpoofArch;
+		if (r == 0 && info && g_SpoofArch && g_hSpoofFor) {
+			// MinHook jumps here from the function's entry, so the return address
+			// is still the caller's.
+			HMODULE hCaller = nullptr;
+			if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					(LPCWSTR)_ReturnAddress(), &hCaller) && hCaller == g_hSpoofFor) {
+				info->architecture = g_SpoofArch;
+			}
 		}
 		return r;
 	}
@@ -603,6 +619,9 @@ bool CDlssNR::Init(ID3D11Device* pDevice, const wchar_t* pConfiguredDllPath, boo
 	if (!LoadSnippet(pConfiguredDllPath)) {
 		return false;
 	}
+	if (m_bArchOverride) {
+		g_hSpoofFor = m_hSnippet;   // loaded, not yet initialised: its arch query is still to come
+	}
 
 	m_pfnInit      = (PFN_NGX_D3D12_Init_Ext)          GetProcAddress(m_hSnippet, "NVSDK_NGX_D3D12_Init_Ext");
 	m_pfnPopulate  = (PFN_NGX_D3D12_PopulateParameters)GetProcAddress(m_hSnippet, "NVSDK_NGX_D3D12_PopulateParameters_Impl");
@@ -752,6 +771,7 @@ void CDlssNR::Shutdown()
 	// while another thread is inside the detour is not worth the risk, and the
 	// override is inert once g_SpoofArch is cleared.
 	g_SpoofArch = 0;
+	g_hSpoofFor = nullptr;
 
 	if (m_State == State::Ready) {
 		m_State = State::Off;
@@ -1088,6 +1108,10 @@ bool CDlssNR::Evaluate(const Params& p)
 		return false;
 	}
 
+	LARGE_INTEGER qpf = {}, t0 = {}, t1 = {}, t2 = {}, t3 = {};
+	QueryPerformanceFrequency(&qpf);
+	QueryPerformanceCounter(&t0);
+
 	// The renderer has just written the input texture. Make that work reach the
 	// GPU and finish before the other device reads it -- again on the CPU, so
 	// there is exactly one ordering rule to get right instead of two timelines
@@ -1099,6 +1123,7 @@ bool CDlssNR::Evaluate(const Params& p)
 		Log(L"input never became ready");
 		return false;
 	}
+	QueryPerformanceCounter(&t1);
 
 	// No barriers: a texture shared from D3D11 comes back with
 	// ALLOW_SIMULTANEOUS_ACCESS already set (measured: D3D12 reports flags
@@ -1106,6 +1131,7 @@ bool CDlssNR::Evaluate(const Params& p)
 	// it would only add a way to get the state wrong.
 	PushEvaluateParams(m_pParams, p, m_bResetPending || p.bNoHistory);
 	const NVSDK_NGX_Result r = CallEvaluate(m_pParams);
+	QueryPerformanceCounter(&t2);
 
 	m_LastResult = r;
 	if (NGX_FAILED(r)) {
@@ -1119,6 +1145,10 @@ bool CDlssNR::Evaluate(const Params& p)
 		Log(L"could not submit the Evaluate work");
 		return false;
 	}
+	QueryPerformanceCounter(&t3);
+	m_Timing.inputWaitMs = double(t1.QuadPart - t0.QuadPart) * 1000.0 / qpf.QuadPart;
+	m_Timing.recordMs    = double(t2.QuadPart - t1.QuadPart) * 1000.0 / qpf.QuadPart;
+	m_Timing.gpuWaitMs   = double(t3.QuadPart - t2.QuadPart) * 1000.0 / qpf.QuadPart;
 
 	m_bResetPending = false;
 	return true;

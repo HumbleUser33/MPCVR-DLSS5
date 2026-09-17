@@ -72,12 +72,13 @@ HRESULT CDlssStabilizer::CreateTarget(ID3D11Device* pDevice, UINT width, UINT he
 	return hr;
 }
 
-bool CDlssStabilizer::Matches(UINT width, UINT height, Motion motion) const
+bool CDlssStabilizer::Matches(UINT width, UINT height, Motion motion, bool bMotionOnly, const FlowSettings& flow) const
 {
-	return m_width == width && m_height == height && m_Requested == motion && m_pPSStabilize;
+	return m_width == width && m_height == height && m_Requested == motion && m_bMotionOnly == bMotionOnly
+		&& m_FlowSettings == flow && m_pPSStabilize;
 }
 
-HRESULT CDlssStabilizer::CreateResources(ID3D11Device* pDevice, UINT width, UINT height)
+HRESULT CDlssStabilizer::CreateResources(ID3D11Device* pDevice, UINT width, UINT height, bool bMotionOnly)
 {
 	HRESULT hr = S_OK;
 	const struct { UINT resid; ID3D11PixelShader** ppShader; } shaders[] = {
@@ -123,6 +124,9 @@ HRESULT CDlssStabilizer::CreateResources(ID3D11Device* pDevice, UINT width, UINT
 	if (SUCCEEDED(hr)) {
 		hr = CreateTarget(pDevice, width, height, DXGI_FORMAT_R8_UNORM, m_Confidence);
 	}
+	if (bMotionOnly) {
+		return hr;
+	}
 	for (int i = 0; i < 2 && SUCCEEDED(hr); i++) {
 		hr = CreateTarget(pDevice, width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, m_History[i]);
 		if (SUCCEEDED(hr)) {
@@ -147,11 +151,11 @@ HRESULT CDlssStabilizer::StartDetector()
 
 HRESULT CDlssStabilizer::Create(ID3D11Device* pDevice, ID3D11DeviceContext* pContext, UINT width, UINT height, Motion motion,
 	ID3D11InputLayout* pInputLayout, ID3D11VertexShader* pVertexShader,
-	ID3D11SamplerState* pSamplerPoint, ID3D11SamplerState* pSamplerLinear)
+	ID3D11SamplerState* pSamplerPoint, ID3D11SamplerState* pSamplerLinear, bool bMotionOnly, const FlowSettings& flow)
 {
 	CheckPointer(pDevice, E_POINTER);
 	CheckPointer(pContext, E_POINTER);
-	if (Matches(width, height, motion)) {
+	if (Matches(width, height, motion, bMotionOnly, flow)) {
 		return S_OK;
 	}
 	// What failed once fails again: no new attempt on every picture until the size
@@ -164,7 +168,7 @@ HRESULT CDlssStabilizer::Create(ID3D11Device* pDevice, ID3D11DeviceContext* pCon
 		return E_INVALIDARG;
 	}
 
-	HRESULT hr = CreateResources(pDevice, width, height);
+	HRESULT hr = CreateResources(pDevice, width, height, bMotionOnly);
 	if (FAILED(hr)) {
 		DLog(L"CDlssStabilizer::Create() : {}x{} failed with error {}", width, height, HR2Str(hr));
 		Release();
@@ -183,17 +187,23 @@ HRESULT CDlssStabilizer::Create(ID3D11Device* pDevice, ID3D11DeviceContext* pCon
 	m_height         = height;
 	m_Requested      = motion;
 	m_ActiveMotion   = motion;
+	m_bMotionOnly    = bMotionOnly;
+	m_FlowSettings   = flow;
 
 	std::wstring fallback;
 	if (motion == Motion::OpticalFlow) {
-		m_flowFactor = FlowFactor(height);
-		CDlssOpticalFlow::Options options;   // grid 4, medium, both directions, cost: what --tstab measured
+		m_flowFactor = flow.flowFactor ? flow.flowFactor : FlowFactor(height);
+		CDlssOpticalFlow::Options options;
+		options.gridSize      = flow.gridSize;
+		options.perfLevel     = flow.perfLevel;
+		options.bidirectional = flow.bidirectional;
+		options.cost          = flow.cost;
 		if (!m_Flow.Init(pDevice, pContext, width / m_flowFactor, height / m_flowFactor, options)) {
 			fallback = m_Flow.GetStatusLine();
 			m_ActiveMotion = Motion::Detector;
 		}
 	}
-	if (m_ActiveMotion == Motion::Detector) {
+	if (m_ActiveMotion == Motion::Detector && !bMotionOnly) {
 		hr = StartDetector();
 		if (FAILED(hr)) {
 			Release();
@@ -206,6 +216,10 @@ HRESULT CDlssStabilizer::Create(ID3D11Device* pDevice, ID3D11DeviceContext* pCon
 
 	if (m_ActiveMotion == Motion::OpticalFlow) {
 		m_status = std::format(L"Optical Flow {}x{}", m_Flow.Width(), m_Flow.Height());
+	} else if (bMotionOnly) {
+		// Nothing to fall back on: the detector says what stands still, not where
+		// anything went.
+		m_status = fallback.empty() ? L"no motion vectors" : L"no motion vectors (Optical Flow: " + fallback + L")";
 	} else if (!fallback.empty()) {
 		m_status = L"shader detector (Optical Flow: " + fallback + L")";
 	} else {
@@ -244,6 +258,8 @@ void CDlssStabilizer::Release()
 	m_pSamplerLinear = nullptr;
 	m_width  = 0;
 	m_height = 0;
+	m_bMotionOnly   = false;
+	m_FlowSettings  = FlowSettings();
 	m_iHistory      = 0;
 	m_iInput        = 0;
 	m_iFlowFailures = 0;
@@ -344,7 +360,7 @@ void CDlssStabilizer::PrepareMotion(ID3D11DeviceContext* pContext, ID3D11ShaderR
 		const FLOAT zero[4] = { 0, 0, 0, 0 };
 		pContext->ClearRenderTargetView(m_pMotionTarget, zero);
 		pContext->ClearRenderTargetView(m_Confidence.pRenderTarget, zero);
-		if (m_Flow.LastExecuteFailed() && ++m_iFlowFailures >= kFlowFailuresBeforeFallback) {
+		if (!m_bMotionOnly && m_Flow.LastExecuteFailed() && ++m_iFlowFailures >= kFlowFailuresBeforeFallback) {
 			const std::wstring why = m_Flow.GetStatusLine();
 			if (SUCCEEDED(StartDetector())) {
 				m_status = L"shader detector (Optical Flow: " + why + L")";
@@ -354,6 +370,9 @@ void CDlssStabilizer::PrepareMotion(ID3D11DeviceContext* pContext, ID3D11ShaderR
 		return;
 	}
 
+	if (m_bMotionOnly) {
+		return;   // no Optical Flow, no vectors
+	}
 	m_Detector.Process(pContext, pInput, 1.0f, m_pInputLayout, m_pVertexShader, m_pSamplerPoint, m_pSamplerLinear, false);
 	m_bHaveMotion = true;
 }
@@ -361,7 +380,7 @@ void CDlssStabilizer::PrepareMotion(ID3D11DeviceContext* pContext, ID3D11ShaderR
 void CDlssStabilizer::Stabilize(ID3D11DeviceContext* pContext, ID3D11ShaderResourceView* pInput,
 	ID3D11ShaderResourceView* pNetwork, float strength, bool bNewPicture)
 {
-	if (!m_width || !pContext || !pInput || !pNetwork) {
+	if (!m_width || !pContext || !pInput || !pNetwork || m_bMotionOnly) {
 		return;
 	}
 

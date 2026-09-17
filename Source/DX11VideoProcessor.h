@@ -32,6 +32,8 @@
 #include "D3DUtil/D3D11Geometry.h"
 #include "DLSS/DlssStabilizer.h"
 #include "DLSS/DlssNR.h"
+#include "DLSS/DlssSR.h"
+#include "DLSS/DlssTiming.h"
 #include "VideoProcessor.h"
 #include "SubPic/DX11SubPic.h"
 
@@ -201,6 +203,32 @@ private:
 	int  m_iDlssNRMotion = DLSSNR_MOTION_DEF;
 	bool m_bDlssNRMotionVectors = false; // Optical Flow vectors to the network as well
 	bool m_bDlssNewPicture = false;     // the next DLSS pass sees a new picture, not a redraw
+
+	// DLSS Super Resolution in place of the resize shaders when the picture grows.
+	CDlssSR m_DlssSR;
+	std::wstring m_strDlssSRDllPath;
+	bool m_bDlssSR = false;             // user setting
+	bool m_bDlssSRActive = false;       // setting AND the NGX session is up
+	int  m_iDlssSRPreset = DLSSSR_PRESET_DEF;
+	CDlssStabilizer m_DlssSRMotion;     // Optical Flow vectors, motion only, when DLSS 5 NR has none to lend
+	bool m_bDlssSRNewPicture = false;   // the next pass sees a new picture, not a redraw
+	std::wstring m_strDlssSRMotion;     // where the vectors came from, for the statistics
+
+	// Render ahead while a DLSS pass runs: samples are processed early by what the
+	// passes take, and each finished picture waits for its time (CRenderAhead).
+	bool m_bDlssRenderAhead = true;     // user setting
+	CRenderAhead m_RenderAhead;
+	CPreciseSleep m_PreciseSleep;
+	CComPtr<ID3D11Query> m_pPictureDoneQuery;
+	uint64_t m_tickSampleStart = 0;     // GetPreciseTick() when ProcessSample began on the current sample
+	// Time of each DLSS stage, for the statistics.
+	CGpuStageTimes m_DlssStageTimes;
+	CRollingMs m_DlssNRTimes;
+	int m_iStatsLines = 20;             // lines the statistics box is sized for
+
+	bool RenderAheadActive() const { return m_bDlssRenderAhead && (m_bDlssNRActive || m_bDlssSRActive); }
+	void MarkPictureSubmitted();
+	void HoldUntilPresentTime(const REFERENCE_TIME frameStartTime, const bool bMeasure);
 
 	CDlssStabilizer::Motion DlssMotionSource() const
 	{
@@ -385,6 +413,14 @@ private:
 	bool DlssNRSupportedHere() const;
 	void UpdateDlssNR();
 	std::wstring GetDlssStatus() override;
+	// Scales rSrc of the input to dstRect, before rotation, through DLSS Super
+	// Resolution. S_FALSE where it does not apply -- the picture does not grow on
+	// both axes, or no feature can be made for these sizes -- and the resize shaders
+	// then do the whole job.
+	HRESULT DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSrc, const CRect& dstRect, const int rotation, Tex2D_t** ppResult);
+	bool DlssSRSupportedHere() const;
+	void UpdateDlssSR();
+	std::wstring GetDlssSRStatus() override;
 
 	HRESULT AlphaBlt(ID3D11ShaderResourceView* pShaderResource, ID3D11Texture2D* pRenderTarget,
 					 ID3D11Buffer* pVertexBuffer, D3D11_VIEWPORT* pViewPort,
@@ -403,6 +439,8 @@ private:
 	void UpdateStatsStatic() override;
 	//void UpdateStatsPostProc();
 	HRESULT DrawStats(ID3D11Texture2D* pRenderTarget);
+	std::wstring GetStatsText() override;
+	int GetRenderAhead() override;
 
 public:
 	// IMFVideoProcessor

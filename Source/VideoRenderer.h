@@ -159,6 +159,7 @@ public:
 	HRESULT SetMediaType(const CMediaType *pmt) override;
 	HRESULT DoRenderSample(IMediaSample* pSample) override;
 	HRESULT Receive(IMediaSample* pMediaSample) override;
+	int GetRenderAhead() override { return m_VideoProcessor ? m_VideoProcessor->GetRenderAhead() : 0; }
 
 	HRESULT BeginFlush() override;
 	HRESULT EndFlush() override;

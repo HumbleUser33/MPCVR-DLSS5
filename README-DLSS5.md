@@ -2,7 +2,9 @@
 
 A fork of [Aleksoid1978/VideoRenderer](https://github.com/Aleksoid1978/VideoRenderer) that adds
 an optional NVIDIA **DLSS 5 Neural Rendering** pass (NGX feature 18) to the Direct3D 11
-video pipeline, with a temporal stabilizer made for video.
+video pipeline, with a temporal stabilizer made for video, and an experimental option to
+enlarge the picture with **DLSS Super Resolution** (NGX feature 1) instead of the resize
+shaders.
 
 The renderer stays a Direct3D 11 filter. Nothing about its existing pipeline changes when
 the feature is off, and the rendering is bit-identical to upstream in that state.
@@ -18,6 +20,7 @@ the feature is off, and the rendering is bit-identical to upstream in that state
 | Player | MPC-BE or any DirectShow player that lets you force a renderer |
 | DLL | `nvngx_dlssnr.dll` — **not included, see below** |
 | Optical Flow | `nvofapi64.dll`, installed with the NVIDIA driver (RTX 20 series and later). Optional: without it the stabilizer uses its shader detector |
+| DLSS Super Resolution | Optional: `nvngx_dlss.dll` 310.5 or later (DLSS 4.5), from the public [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) repository (`lib/Windows_x86_64/rel`). Developed with 310.9.1 |
 
 ### The DLL is not in this repository
 
@@ -32,6 +35,8 @@ You supply it yourself. The filter looks for it, in order:
 4. one and two directories above the filter
 
 The **DLSS 5** property page has a **DLL** field and a browse button if you keep it elsewhere.
+`nvngx_dlss.dll`, for DLSS Super Resolution, is searched the same way and has its own field;
+it must keep its name, because the driver's NGX runtime loads it by name from that folder.
 
 ---
 
@@ -84,7 +89,10 @@ address is the caller's again and the check fails from inside the shim.
 `NGXCubinGeneric::SetGPUArch` and refuses anything below its own declared minimum
 (`0x1B0`, Blackwell). `CDlssNR` hooks `NvAPI_GPU_GetArchInfo` with MinHook and reports the
 minimum the snippet itself declares — nothing is invented. It has to be installed before
-the snippet loads, because the value is read once during init and cached.
+the snippet loads, because the value is read once during init and cached. The spoofed answer
+goes only to calls made from `nvngx_dlssnr.dll` itself: every NGX snippet asks the same
+question, and DLSS Super Resolution told it runs on Blackwell picks kernels an Ampere or Ada
+card cannot run, writes nothing and removes the device.
 
 **Video has no motion vectors and no depth.** The network runs colour-only at
 `ScalingRatio 1.0`: `DLSSNR.Depth` is never set, and `DLSSNR.MVec` only when the stabilizer is
@@ -191,6 +199,120 @@ repeated pictures (variable frame rates, 25p stored as 50p) handled like the per
 
 ---
 
+## DLSS Super Resolution (experimental)
+
+**Use DLSS SR 4.5 for upscaling**, on the DLSS 5 page, enlarges the picture with DLSS Super
+Resolution instead of the **Upscaling** method of the main page, which is then greyed. It is
+independent of DLSS 5 NR: another DLL, another session, and it works with NR on or off. When
+NR runs before upscaling, SR takes its output.
+
+**How it runs.** Unlike the NR snippet, this feature runs on Direct3D 11 through the display
+driver's NGX runtime (`_nvngx.dll`), which loads `nvngx_dlss.dll` itself: no second device,
+no shared textures, no waits (`Source/DLSS/DlssSR.cpp`). Every call into NGX runs in a
+separate device context state, so NGX's compute bindings never reach the renderer's passes;
+the harness checks that the renderer's own resize gives the same picture, bit for bit, before
+and after an evaluation. Several things were settled by measurement: the runtime's
+`NVSDK_NGX_D3D11_Init_Ext` works (its plain `Init` answers `OutOfDate` once a current snippet
+is on the path, and `Init_ProjectID` with the documented argument order crashes), and its
+`Shutdown1(device)` crashes where `Shutdown()` ends the session cleanly, leaves an NR session
+in the same runtime working, and allows a new one.
+
+**Inputs.** Video has no jitter and no depth: the input is the picture at its own size, the
+depth a constant plane, and the motion vectors come from NVIDIA Optical Flow — lent by the NR
+stabilizer when it runs on the same picture, otherwise from a motion-only estimator at about
+540 lines. A redraw gets no vectors. The quality mode follows the scale (Quality below ×1.6,
+Balanced below ×1.85, Performance below ×2.5, Ultra Performance above) and DLSS picks the
+model for it unless a preset is set: with 310.9.1, **M** at ×2, **L** at ×3, **K** below.
+Past ×4 DLSS stops there and the resize shaders do the rest; where the picture does not grow
+on both axes, or no feature can be made for a size, the Upscaling method runs as before.
+
+**Cost** on an RTX 3050 6 GB (`--tsr`, GPU time per frame):
+
+| Source → output | Mode, preset | Time |
+|---|---|---|
+| 1920×1080 → 3840×2160 | Performance, M (default) | 23.3 ms |
+| same | preset J / K / L | 10.1 / 11.2 / 31.6 ms |
+| 1280×720 → 3840×2160 | Ultra Performance, L (default) | 17.2 ms |
+| 1920×800 → 3840×1600 | Performance, M | 16.3 ms |
+| 1920×1080 → 2560×1440 | Quality, K | 4.2 ms |
+
+Add the Optical Flow vectors, 1.6 to 2.2 ms at 1080p, when NR does not lend them.
+
+**Quality — read this before turning it on.** `--tsrq` pans windows of six 4K film frames by
+half a source pixel per frame, reduces them to the source, grains or compresses them per
+frame, and measures every method against the reference it never saw. Averages over the six
+frames (PSNR in dB; *grain* is the fine detail left in flat areas, the source keeps about 2.4):
+
+| | Clean, still | Clean, moving | Grain left | Compressed, still | Compressed, moving |
+|---|---|---|---|---|---|
+| Catmull-Rom | **55.9** | **55.9** | 2.40 | **46.9** | **46.8** |
+| Lanczos3 | 54.7 | 54.7 | 2.55 | 46.5 | 46.4 |
+| **DLSS SR, Optical Flow vectors** | 50.6 | 49.7 | **0.73** | 46.2 | 45.5 |
+| DLSS SR, no vectors | 51.8 | 49.2 | 0.45 | 46.5 | 45.3 |
+| DLSS SR, exact motion (not available in playback) | 51.8 | 54.3 | 0.45 | 46.5 | 49.7 |
+
+With the vectors a player can compute, DLSS SR is **less faithful than Catmull-Rom**: 5 to 6
+dB below on clean film frames, about 1 dB below on compressed ones, and it **removes about
+70 % of the film grain** over time. Without jitter a still picture gives it nothing new, and
+Optical Flow is not precise enough for it to accumulate detail on a pan: finer flow — the
+source size, a vector per pixel, the slowest search — measured no better, and worse on still
+pictures. Only with exact motion does it beat the filters, on compressed moving pictures. The
+option is therefore off by default and marked experimental; your eyes decide whether its
+cleaner look is worth it on your films.
+
+---
+
+## Render ahead
+
+The renderer wakes up 8 ms before a picture's time and only then processes it, so whatever
+the DLSS passes take beyond those 8 ms used to reach the screen late. The renderer's own *Sync
+offset* on an RTX 4060: −7 ms without DLSS, +11 to +17 ms with DLSS 5 NR, +11 to +19 ms with
+DLSS 5 NR and DLSS SR — and DLSS SR's GPU time comes on top, since the GPU runs it after
+Present has returned. The delay also varied by several ms from picture to picture, enough to
+move some pictures to the next refresh of a 60 Hz screen.
+
+**Render ahead** (DLSS page, on by default) measures each picture from the start of its
+processing to the GPU being done with it, and starts the next pictures earlier by the slowest
+of the last 32 plus 3 ms. Each picture then waits, while the GPU finishes it, for the moment
+the renderer presents at without DLSS: half a refresh before its time, on the reference clock.
+Presentation stays on the audio clock. It never waits for the GPU itself: a picture not
+finished at its present time is presented anyway, reaches the screen once the GPU is done, as
+it would have without render ahead, and moves the start earlier. It does nothing while
+neither DLSS pass runs, and a picture cannot start before the previous one has been presented:
+about a frame earlier at most, never more than 60 ms.
+
+Measured in a DirectShow graph with the filter itself (`playback_test.exe`): an 800×450 film in
+a 1280×720 window on an RTX 3050 and a 60 Hz screen, with DLSS 5 NR and DLSS SR (NR 23 ms,
+stabilizer 1.6 ms, SR 3.2 ms), 20 s per run. Sync offset, mean (5th…95th percentile), and
+skipped pictures:
+
+| Film | Render ahead off | Render ahead on |
+|---|---|---|
+| 23.976 fps | +15.1 ms (+14…+16), 0 skipped | **−6.4 ms (−7…−6)**, 0 skipped |
+| 29.97 fps | +17.1 ms (+16…+19), 0 skipped | **−6.5 ms (−7…−6)**, 0 skipped |
+| 59.94 fps, more than this GPU can do | +20.2 ms, 707 skipped | +19.9 ms, 707 skipped |
+
+Without DLSS the same film measures −7.2 ms (−8…−6). A first version waited for the GPU before
+presenting; at 29.97 fps that took the time from the next picture and skipped 25 of them in
+20 s. At 29.97 fps most pictures are counted *late* below: the GPU finishes DLSS SR a moment
+after the present time, because the source cannot hand over a picture earlier than a frame
+minus its own time. Render ahead does not make the chain faster than the video: at 50 or 60 fps
+with DLSS 5 NR pictures are still skipped, as they were.
+
+The statistics show where the time goes and what render ahead does:
+
+    DLSS (ms)     : NR 23.0, stabilizer 1.7, SR 3.3
+    Render ahead  : 34 ms (ready in 29.8, max 30.6), late 10
+
+*ready in* is the whole picture, from the start of processing to the GPU being done: the mean
+and the slowest of the last 32. *late* counts pictures the GPU had not finished at their present
+time. A few at start-up are normal; a count that keeps growing means the chain barely fits the
+frame rate, and a lighter DLSS SR preset gives it room. DLSS 5 NR is timed where the renderer
+waits for it, the other stages with GPU timestamps while the statistics are shown.
+*Times(ms): Present* includes the wait.
+
+---
+
 ## Settings
 
 Everything lives on the **DLSS 5** page of the renderer's properties (x64 builds only) and is
@@ -213,14 +335,19 @@ stored under `HKCU\Software\MPC-BE Filters\MPC Video Renderer`.
 | Motion | NVIDIA Optical Flow | Or *Shader detector (still areas)*. Applies on the next picture |
 | Send the motion vectors to DLSS | off | Optical Flow only. Steadier, but the network renders differently around moving objects |
 | Disable temporal history | off | Forces `DLSSNR.Reset` every frame. The stabilizer is not affected |
+| Use DLSS SR 4.5 for upscaling | off | Experimental, see above. Greys the main page's Upscaling list |
+| Preset (DLSS SR) | Automatic | Or J, K, L, M. Applies on the next picture |
+| DLL (DLSS SR) | empty | `nvngx_dlss.dll` or its folder. Empty means search next to the filter and up |
+| Render ahead to keep DLSS pictures in sync with audio | on | See above. Used only while DLSS 5 NR or DLSS SR runs |
 
 **Default** on the page resets the tuning, from Style to Disable temporal history, motion
-settings included; it leaves Enable, the key and the DLL path alone. Applying the page sends
-only what was changed on it, so it never undoes the toggle key or the main page, and the main
-page leaves these settings alone.
+settings, the DLSS SR preset and render ahead included; it leaves Enable, Use DLSS SR, the key
+and both DLL paths alone. Applying the page sends only what was changed on it, so it never
+undoes the toggle key or the main page, and the main page leaves these settings alone.
 
 The feature is also reachable programmatically through `IExFilterConfig`:
-`Flt_SetBool("dlssNR", true/false)` and `Flt_GetBool("dlssNR", &b)`.
+`Flt_SetBool("dlssNR", true/false)` and `Flt_GetBool("dlssNR", &b)`. `Flt_GetString("statsText")`
+returns the statistics as they are drawn on the picture, for tools that log them.
 
 ---
 
@@ -243,13 +370,14 @@ module resident while the session is up. The stabilizer adds about 95 MB at 1080
 at 2160p, plus what the Optical Flow engine allocates.
 
 **Cost.** Two CPU stalls per frame for the cross-device synchronisation, plus the network
-itself and the stabilizer. Fine for video framerates; this is not a low-latency design.
+itself and the stabilizer. Fine for video framerates; this is not a low-latency design. Render
+ahead keeps pictures on time as long as a picture takes less than about a frame.
 
 ---
 
 ## Diagnostic tools
 
-`tools/dlssnr_probe/` builds three programs; `build.cmd` builds them.
+`tools/dlssnr_probe/` holds four programs; `build.cmd` builds them.
 
 **`dlssnr_probe.exe`** — talks to the snippet directly and reports what it says about
 itself: caller validation, the parameter vtable layout, `GetFeatureRequirements`, which
@@ -291,14 +419,38 @@ dlssnr_harness.exe --tflow        NVIDIA Optical Flow: direction, units, accurac
 dlssnr_harness.exe --tstab        the post-DLSS stabilizer variants on real pictures
 dlssnr_harness.exe --tstabport    the filter's stabilizer class against those passes, redraws included
 dlssnr_harness.exe --tstabbench   what the stabilizer costs at 1080p and 2160p
+dlssnr_harness.exe --tpipeline    the whole DLSS chain as the renderer runs it: CPU and GPU time per stage
+dlssnr_harness.exe --tsr          DLSS Super Resolution: bring-up, presets, scales, costs, NR next to it
+dlssnr_harness.exe --tsrq         DLSS SR against the resize shaders on moving film frames
+dlssnr_harness.exe --tupscale     the resize shaders (and EfRLFN, with ONNX Runtime) on film frames
+dlssnr_harness.exe --tupscalecost what EfRLFN costs at film sizes
 ```
 
 `--tframes N` sets the frames per run; `--tstrong` uses the strongest network settings;
 `--timage <file>` picks the photo for `--teffect`, `--tflow` and `--tstab` (a Windows 11
-wallpaper by default).
+wallpaper by default). `--nonr` skips the DLSS 5 NR session for the suites that do not need
+it, `--srdll <path>` points at `nvngx_dlss.dll`, and `--srrefs N` limits `--tsrq` to the
+first N references. `--tupscale` and `--tsrq` read 4K film frames from
+`tools/dlssnr_probe/upscale_refs/`.
+
+A neural upscaler, EfRLFN, was measured too and not integrated: 922 ms per 1080p frame on the
+RTX 3050 with DirectML (`--tupscalecost`), and no better than Catmull-Rom or Lanczos on clean
+film frames (`--tupscale`).
 
 **`vp_rebuild_test.exe`** — checks that rebuilding the hardware video processor keeps the
 picture, which is what used to show a green frame when DLSS was toggled while paused.
+
+**`playback_test.exe`** — plays a synthetic film through the built x64 filter
+(`_bin\Filter_x64\MpcVideoRenderer64.ax`) in a DirectShow graph, in a window, on the system
+clock: DLSS off, DLSS SR, and DLSS 5 NR with SR, render ahead off and on. It reads the filter's
+statistics ten times a second and reports the Sync offset, skipped and late pictures, and how
+long pause, run and stop take; it fails when a state change takes more than a second. The
+settings go to the filter for the run only, nothing is saved.
+
+```
+playback_test.exe [--seconds 20] [--size 800x450] [--window 1280x720] [--fps 23.976] [--only N]
+playback_test.exe --dlsspage 10   shows the filter's DLSS 5 page for 10 s instead
+```
 
 ---
 
@@ -309,7 +461,8 @@ MPC Video Renderer is by **Aleksoid1978** and contributors and is licensed **GPL
 
 The NGX ABI declarations in `Source/DLSS/NGXTypes.h` are hand-written from the publicly
 documented shape of the interface. NVIDIA DLSS, NGX and the `nvngx_*` / `_nvngx.dll`
-binaries are NVIDIA property under their own licences and are not distributed here.
+binaries are NVIDIA property under their own licences and are not distributed here;
+`nvngx_dlss.dll` comes from NVIDIA's own DLSS repository under its licence.
 
 `Source/DLSS/NvOF/` holds the two interface headers of the NVIDIA Optical Flow SDK 5.0.7,
 copied unchanged. Each carries its own permission notice ("This copyright notice applies to

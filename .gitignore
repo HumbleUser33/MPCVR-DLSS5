@@ -9,6 +9,7 @@
 # NVIDIA's own binary. Not ours to redistribute, and at ~159 MB it is over
 # GitHub's per-file limit anyway. See the README for where it goes.
 nvngx_dlssnr.dll
+nvngx_dlss.dll
 nvngx_dlssd.dll
 nvngx_dlssg.dll
 _nvngx.dll

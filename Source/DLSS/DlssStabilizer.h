@@ -47,16 +47,32 @@ class CDlssStabilizer
 public:
 	enum class Motion { Detector, OpticalFlow };
 
+	// How Optical Flow runs. The defaults are what the stabilizer was measured
+	// with; DLSS Super Resolution needs finer vectors (--tsrq).
+	struct FlowSettings {
+		UINT flowFactor = 0;                                  // working pixels per flow pixel; 0: about 540 lines
+		UINT gridSize = 4;                                    // flow pixels per vector
+		NV_OF_PERF_LEVEL perfLevel = NV_OF_PERF_LEVEL_MEDIUM;
+		bool bidirectional = true;                            // backward flow and cost feed the confidence map
+		bool cost = true;
+		bool operator==(const FlowSettings&) const = default;
+	};
+
 	// Everything for a working size and motion source; nothing if both already
 	// match. Optical Flow that cannot start falls back to the detector, and
 	// GetStatusLine() says why. The renderer's input layout, vertex shader and
 	// samplers are used for every pass and must outlive this object's resources.
+	//
+	// bMotionOnly builds the Optical Flow vectors and nothing else, for DLSS Super
+	// Resolution: no history, no result, no detector to fall back on. Stabilize
+	// then does nothing, and GetMotionVectors() is null while Optical Flow is down.
 	HRESULT Create(ID3D11Device* pDevice, ID3D11DeviceContext* pContext, UINT width, UINT height, Motion motion,
 		ID3D11InputLayout* pInputLayout, ID3D11VertexShader* pVertexShader,
-		ID3D11SamplerState* pSamplerPoint, ID3D11SamplerState* pSamplerLinear);
+		ID3D11SamplerState* pSamplerPoint, ID3D11SamplerState* pSamplerLinear,
+		bool bMotionOnly = false, const FlowSettings& flow = FlowSettings());
 	void Release();
 
-	bool Matches(UINT width, UINT height, Motion motion) const;
+	bool Matches(UINT width, UINT height, Motion motion, bool bMotionOnly = false, const FlowSettings& flow = FlowSettings()) const;
 	bool IsCreated() const { return m_width != 0; }
 
 	// The next picture starts over: a seek, a new session.
@@ -92,7 +108,7 @@ private:
 	};
 
 	static HRESULT CreateTarget(ID3D11Device* pDevice, UINT width, UINT height, DXGI_FORMAT format, Target& target);
-	HRESULT CreateResources(ID3D11Device* pDevice, UINT width, UINT height);
+	HRESULT CreateResources(ID3D11Device* pDevice, UINT width, UINT height, bool bMotionOnly);
 	HRESULT StartDetector();
 	void Draw(ID3D11DeviceContext* pContext, ID3D11PixelShader* pShader,
 		std::initializer_list<ID3D11RenderTargetView*> targets, UINT width, UINT height,
@@ -130,6 +146,8 @@ private:
 	UINT   m_flowFactor = 1;
 	Motion m_Requested    = Motion::OpticalFlow;
 	Motion m_ActiveMotion = Motion::OpticalFlow;
+	bool   m_bMotionOnly  = false;
+	FlowSettings m_FlowSettings;
 
 	int  m_iHistory      = 0;       // m_History slot the last new picture wrote
 	int  m_iInput        = 0;       // m_Input slot holding the last new picture's input

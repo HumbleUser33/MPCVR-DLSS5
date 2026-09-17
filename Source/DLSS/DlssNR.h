@@ -107,6 +107,16 @@ public:
 		bool operator==(const Params&) const = default;
 	};
 
+	// Where the time of the last Evaluate went, in ms: waiting for Direct3D 11 to
+	// finish writing the input, recording the network's work, and waiting for the
+	// GPU to run it.
+	struct Timing {
+		double inputWaitMs = 0;
+		double recordMs    = 0;
+		double gpuWaitMs   = 0;
+	};
+	const Timing& LastTiming() const { return m_Timing; }
+
 	enum class State {
 		Off, DllNotFound, DllLoadFailed, ExportsMissing, ShimMissing,
 		NoD3D12, ApiInitFailed, ShareFailed, FeatureCreateFailed,
@@ -278,6 +288,7 @@ private:
 
 	UINT m_featW = 0, m_featH = 0;
 	int  m_featPreset = -1;
+	Timing m_Timing;
 
 	bool m_bInitialised  = false;
 	bool m_bUseShim      = false;

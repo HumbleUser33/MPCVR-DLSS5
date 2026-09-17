@@ -120,6 +120,12 @@ void CVRDlssPPage::SetControls()
 	}
 
 	SetDlgItemTextW(IDC_EDIT7, m_SetsPP.szDlssNRDllPath);
+
+	CheckDlgButton(IDC_CHECK25, m_SetsPP.bDlssSR ? BST_CHECKED : BST_UNCHECKED);
+	Combo_SelectByItemData(m_hWnd, IDC_COMBO15, m_SetsPP.iDlssSRPreset);
+	SetDlgItemTextW(IDC_EDIT9, m_SetsPP.szDlssSRDllPath);
+
+	CheckDlgButton(IDC_CHECK26, m_SetsPP.bDlssRenderAhead ? BST_CHECKED : BST_UNCHECKED);
 }
 
 void CVRDlssPPage::EnableControls()
@@ -144,6 +150,17 @@ void CVRDlssPPage::EnableControls()
 	// Vectors exist only with Optical Flow, and only while the stabilizer runs.
 	GetDlgItem(IDC_CHECK24).EnableWindow(bOn && m_SetsPP.iDlssNRStabilizer > 0
 		&& m_SetsPP.iDlssNRMotion == DLSSNR_MOTION_OPTICALFLOW);
+
+	// DLSS Super Resolution does not depend on DLSS 5 NR: another DLL, another session.
+	for (const int id : { IDC_CHECK25, IDC_STATIC37, IDC_EDIT9, IDC_BUTTON4 }) {
+		GetDlgItem(id).EnableWindow(bD3D11);
+	}
+	for (const int id : { IDC_STATIC36, IDC_COMBO15 }) {
+		GetDlgItem(id).EnableWindow(bD3D11 && m_SetsPP.bDlssSR);
+	}
+
+	// Serves both passes, so it stays live whichever of them is on.
+	GetDlgItem(IDC_CHECK26).EnableWindow(bD3D11);
 }
 
 HRESULT CVRDlssPPage::OnConnect(IUnknown* pUnk)
@@ -188,6 +205,11 @@ HRESULT CVRDlssPPage::OnActivate()
 	Combo_AddStringData(m_hWnd, IDC_COMBO14, L"NVIDIA Optical Flow", DLSSNR_MOTION_OPTICALFLOW);
 	Combo_AddStringData(m_hWnd, IDC_COMBO14, L"Shader detector (still areas)", DLSSNR_MOTION_DETECTOR);
 
+	Combo_AddStringData(m_hWnd, IDC_COMBO15, L"Automatic", DLSSSR_PRESET_DEF);
+	for (int preset = DLSSSR_PRESET_J; preset <= DLSSSR_PRESET_M; preset++) {
+		Combo_AddStringData(m_hWnd, IDC_COMBO15, std::format(L"Preset {}", (wchar_t)(L'J' + preset - DLSSSR_PRESET_J)).c_str(), preset);
+	}
+
 	// Keys that players rarely bind to anything destructive. The hook swallows
 	// whichever one is chosen, so it must not be something the player needs.
 	static const struct { const wchar_t* name; int vk; } dlssKeys[] = {
@@ -213,16 +235,22 @@ HRESULT CVRDlssPPage::OnActivate()
 	SendDlgItemMessageW(IDC_SLIDER7, TBM_SETPAGESIZE, 0, 10);
 
 	{
-		// Show whether the snippet actually came up, and why not if it did not.
-		std::wstring status;
-		if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
-			LPWSTR pstr = nullptr;
-			if (S_OK == pIExFilterConfig->Flt_GetString("dlssStatus", &pstr, nullptr) && pstr) {
-				status = pstr;
-				CoTaskMemFree(pstr);
+		// Show whether each session actually came up, and why not if it did not.
+		const struct { const char* field; int id; } statuses[] = {
+			{ "dlssStatus",   IDC_STATIC28 },
+			{ "dlssSRStatus", IDC_STATIC38 },
+		};
+		for (const auto& s : statuses) {
+			std::wstring status;
+			if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
+				LPWSTR pstr = nullptr;
+				if (S_OK == pIExFilterConfig->Flt_GetString(s.field, &pstr, nullptr) && pstr) {
+					status = pstr;
+					CoTaskMemFree(pstr);
+				}
 			}
+			SetDlgItemTextW(s.id, status.empty() ? L"" : (L"Status: " + status).c_str());
 		}
-		SetDlgItemTextW(IDC_STATIC28, status.empty() ? L"" : (L"Status: " + status).c_str());
 	}
 
 	SetControls();
@@ -268,6 +296,30 @@ HRESULT CVRDlssPPage::OnActivate()
 	AddHint(IDC_CHECK22,
 		L"Makes the network ignore its previous output on every frame.\n"
 		"The stabilizer is not affected: it works after the network.");
+	AddHint(IDC_CHECK25,
+		L"Enlarges the picture with NVIDIA DLSS Super Resolution instead of\n"
+		"the Upscaling method of the main page, which is then greyed.\n"
+		"Works with or without DLSS 5 NR. Requires nvngx_dlss.dll (DLSS 4.5,\n"
+		"310.5 or later) and an RTX GPU. Motion comes from NVIDIA Optical Flow;\n"
+		"where DLSS cannot run, the Upscaling method takes over.\n"
+		"Experimental: DLSS removes film grain along with compression noise.");
+	AddHint(IDC_COMBO15,
+		L"Automatic lets DLSS pick the model for the scale: with 310.9,\n"
+		"M for x2 (1080p on a 4K screen), L for x3 (720p), K below x1.85.\n"
+		"J and K are the first transformer models, L and M the second.\n"
+		"GPU time per frame at 1080p to 4K on an RTX 3050: J or K 11 ms,\n"
+		"M 24 ms, L 31 ms.");
+	AddHint(IDC_EDIT9,
+		L"Path to nvngx_dlss.dll, or its folder; the file must keep that name.\n"
+		"Leave empty to look next to the filter, then one and two\n"
+		"directories up.");
+	AddHint(IDC_CHECK26,
+		L"The renderer starts a picture 8 ms before its time, so whatever DLSS\n"
+		"takes beyond that shows the picture late, and late by a varying amount.\n"
+		"This starts each picture earlier by the time DLSS 5 NR and DLSS SR\n"
+		"take, measured until the GPU is done with it, then holds it until its\n"
+		"time: the video stays on the audio clock. Used only while one of them\n"
+		"runs; the statistics show it as Render ahead.");
 
 	return S_OK;
 }
@@ -285,6 +337,8 @@ INT_PTR CVRDlssPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				{ IDC_CHECK22, &m_SetsPP.bDlssNRNoHistory,     false },
 				{ IDC_CHECK23, &m_SetsPP.bDlssNRAfterUpscale,  false },
 				{ IDC_CHECK24, &m_SetsPP.bDlssNRMotionVectors, false },
+				{ IDC_CHECK25, &m_SetsPP.bDlssSR,              true  },
+				{ IDC_CHECK26, &m_SetsPP.bDlssRenderAhead,     false },
 			};
 			for (const auto& c : checks) {
 				if (nID == c.id) {
@@ -297,22 +351,26 @@ INT_PTR CVRDlssPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				}
 			}
 
-			if (nID == IDC_BUTTON2) {
+			if (nID == IDC_BUTTON2 || nID == IDC_BUTTON4) {
+				const bool bSR = (nID == IDC_BUTTON4);
+				wchar_t* target = bSR ? m_SetsPP.szDlssSRDllPath : m_SetsPP.szDlssNRDllPath;
 				wchar_t path[MAX_PATH] = {};
-				wcscpy_s(path, m_SetsPP.szDlssNRDllPath);
+				wcscpy_s(path, target);
 
 				OPENFILENAMEW ofn = {};
 				ofn.lStructSize = sizeof(ofn);
 				ofn.hwndOwner   = m_hWnd;
-				ofn.lpstrFilter = L"NGX snippet\0nvngx_dlssnr.dll;nvngx*.dll\0DLL files (*.dll)\0*.dll\0All files (*.*)\0*.*\0\0";
+				ofn.lpstrFilter = bSR
+					? L"DLSS Super Resolution\0nvngx_dlss.dll\0DLL files (*.dll)\0*.dll\0All files (*.*)\0*.*\0\0"
+					: L"NGX snippet\0nvngx_dlssnr.dll;nvngx*.dll\0DLL files (*.dll)\0*.dll\0All files (*.*)\0*.*\0\0";
 				ofn.lpstrFile   = path;
 				ofn.nMaxFile    = std::size(path);
-				ofn.lpstrTitle  = L"Select nvngx_dlssnr.dll";
+				ofn.lpstrTitle  = bSR ? L"Select nvngx_dlss.dll" : L"Select nvngx_dlssnr.dll";
 				ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
 				if (GetOpenFileNameW(&ofn)) {
-					wcscpy_s(m_SetsPP.szDlssNRDllPath, path);
-					SetDlgItemTextW(IDC_EDIT7, m_SetsPP.szDlssNRDllPath);
+					wcscpy_s(target, MAX_PATH, path);
+					SetDlgItemTextW(bSR ? IDC_EDIT9 : IDC_EDIT7, target);
 					SetDirty();
 				}
 				return (LRESULT)1;
@@ -325,6 +383,8 @@ INT_PTR CVRDlssPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				defaults.bDlssNR = m_SetsPP.bDlssNR;
 				defaults.iDlssNRToggleKey = m_SetsPP.iDlssNRToggleKey;
 				wcscpy_s(defaults.szDlssNRDllPath, m_SetsPP.szDlssNRDllPath);
+				defaults.bDlssSR = m_SetsPP.bDlssSR;
+				wcscpy_s(defaults.szDlssSRDllPath, m_SetsPP.szDlssSRDllPath);
 				CopyDlssSettings(m_SetsPP, defaults);
 				SetControls();
 				EnableControls();
@@ -333,12 +393,13 @@ INT_PTR CVRDlssPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 			}
 		}
 
-		if (action == EN_CHANGE && nID == IDC_EDIT7) {
+		if (action == EN_CHANGE && (nID == IDC_EDIT7 || nID == IDC_EDIT9)) {
 			// SetControls fills the box too; only a real edit makes the page dirty.
+			wchar_t* target = (nID == IDC_EDIT9) ? m_SetsPP.szDlssSRDllPath : m_SetsPP.szDlssNRDllPath;
 			wchar_t path[MAX_PATH] = {};
-			GetDlgItemTextW(IDC_EDIT7, path, (int)std::size(path));
-			if (wcscmp(path, m_SetsPP.szDlssNRDllPath)) {
-				wcscpy_s(m_SetsPP.szDlssNRDllPath, path);
+			GetDlgItemTextW(nID, path, (int)std::size(path));
+			if (wcscmp(path, target)) {
+				wcscpy_s(target, MAX_PATH, path);
 				SetDirty();
 			}
 			return (LRESULT)1;
@@ -350,6 +411,7 @@ INT_PTR CVRDlssPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				{ IDC_COMBO12, &m_SetsPP.iDlssNRPreset },
 				{ IDC_COMBO13, &m_SetsPP.iDlssNRToggleKey },
 				{ IDC_COMBO14, &m_SetsPP.iDlssNRMotion },
+				{ IDC_COMBO15, &m_SetsPP.iDlssSRPreset },
 			};
 			for (const auto& c : combos) {
 				if (nID == c.id) {
@@ -397,6 +459,8 @@ HRESULT CVRDlssPPage::OnApplyChanges()
 	// The DLL path is free text; an empty box means "locate it automatically".
 	GetDlgItemTextW(IDC_EDIT7, m_SetsPP.szDlssNRDllPath, (int)std::size(m_SetsPP.szDlssNRDllPath));
 	m_SetsPP.szDlssNRDllPath[std::size(m_SetsPP.szDlssNRDllPath) - 1] = L'\0';
+	GetDlgItemTextW(IDC_EDIT9, m_SetsPP.szDlssSRDllPath, (int)std::size(m_SetsPP.szDlssSRDllPath));
+	m_SetsPP.szDlssSRDllPath[std::size(m_SetsPP.szDlssSRDllPath) - 1] = L'\0';
 
 	// Start from what the renderer holds now and take only what was changed
 	// here, so neither the main page nor the toggle key gets overwritten.
@@ -419,9 +483,15 @@ HRESULT CVRDlssPPage::OnApplyChanges()
 	TAKE_IF_CHANGED(iDlssNRMotion)
 	TAKE_IF_CHANGED(bDlssNRMotionVectors)
 	TAKE_IF_CHANGED(iDlssNRToggleKey)
+	TAKE_IF_CHANGED(bDlssSR)
+	TAKE_IF_CHANGED(iDlssSRPreset)
+	TAKE_IF_CHANGED(bDlssRenderAhead)
 #undef TAKE_IF_CHANGED
 	if (wcscmp(m_SetsPP.szDlssNRDllPath, m_SetsOpened.szDlssNRDllPath)) {
 		wcscpy_s(current.szDlssNRDllPath, m_SetsPP.szDlssNRDllPath);
+	}
+	if (wcscmp(m_SetsPP.szDlssSRDllPath, m_SetsOpened.szDlssSRDllPath)) {
+		wcscpy_s(current.szDlssSRDllPath, m_SetsPP.szDlssSRDllPath);
 	}
 
 	m_pVideoRenderer->SetSettings(current);
@@ -432,6 +502,17 @@ HRESULT CVRDlssPPage::OnApplyChanges()
 	m_SetsOpened = current;
 	SetControls();
 	EnableControls();
+
+	// And whether DLSS Super Resolution came up with it.
+	if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
+		LPWSTR pstr = nullptr;
+		std::wstring status;
+		if (S_OK == pIExFilterConfig->Flt_GetString("dlssSRStatus", &pstr, nullptr) && pstr) {
+			status = pstr;
+			CoTaskMemFree(pstr);
+		}
+		SetDlgItemTextW(IDC_STATIC38, status.empty() ? L"" : (L"Status: " + status).c_str());
+	}
 
 	return S_OK;
 }

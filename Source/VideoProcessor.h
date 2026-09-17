@@ -123,6 +123,7 @@ protected:
 	REFERENCE_TIME m_rtStart = 0;
 	int m_FieldDrawn = 0;
 	bool m_bDoubleFrames = false;
+	REFERENCE_TIME m_rtHeld = 0; // render ahead: time spent holding finished pictures, see TakeHeldTime()
 
 	UINT32 m_uHalfRefreshPeriodMs = 0;
 
@@ -206,6 +207,16 @@ public:
 
 	// One line describing the DLSS 5 NR session; empty when not applicable.
 	virtual std::wstring GetDlssStatus() { return {}; }
+	virtual std::wstring GetDlssSRStatus() { return {}; }
+
+	// Render ahead: how much earlier than usual the next sample should be processed,
+	// in 100 ns units, and how long pictures were held for their time since the last
+	// call. See CRenderAhead.
+	virtual int GetRenderAhead() { return 0; }
+	REFERENCE_TIME TakeHeldTime() { const REFERENCE_TIME held = m_rtHeld; m_rtHeld = 0; return held; }
+
+	// The statistics as drawn on the picture; empty where the processor has none.
+	virtual std::wstring GetStatsText() { return {}; }
 
 	int GetRotation() { return m_iRotation; }
 	virtual void SetRotation(int value) = 0;

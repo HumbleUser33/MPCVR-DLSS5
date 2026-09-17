@@ -82,6 +82,9 @@ protected:
     int m_trRenderLast;             // Time for last frame blt
     int m_tRenderStart;             // Just before we started drawing (mSec)
                                     // derived from timeGetTime.
+    int m_trRenderHeld = 0;         // Part of the last render spent holding a
+                                    // finished picture for its time (render
+                                    // ahead): waiting, so kept out of the blt time.
 
     // When frames are dropped we will play the next frame as early as we can.
     // If it was a false alarm and the machine is fast we slide gently back to
@@ -181,6 +184,11 @@ public:
     HRESULT ShouldDrawSampleNow(IMediaSample *pMediaSample,
                                 __inout REFERENCE_TIME *ptrStart,
                                 __inout REFERENCE_TIME *ptrEnd);
+
+    // How much earlier than its time a sample drawn on time should be handed to
+    // DoRenderSample, beyond the usual 8 ms (100 ns units, >= 0). A renderer that
+    // returns more than 0 must hold the finished picture until its time itself.
+    virtual int GetRenderAhead() { return 0; }
 
     virtual HRESULT SendQuality(REFERENCE_TIME trLate, REFERENCE_TIME trRealStream);
     STDMETHODIMP JoinFilterGraph(__inout_opt IFilterGraph * pGraph, __in_opt LPCWSTR pName);

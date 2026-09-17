@@ -429,6 +429,9 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_iDlssNRStabilizer    = config.iDlssNRStabilizer;
 	m_iDlssNRMotion        = config.iDlssNRMotion;
 	m_bDlssNRMotionVectors = config.bDlssNRMotionVectors;
+	m_bDlssSR              = config.bDlssSR;
+	m_iDlssSRPreset        = config.iDlssSRPreset;
+	m_strDlssSRDllPath     = config.szDlssSRDllPath;
 
 	m_nCurrentAdapter = -1;
 
@@ -691,6 +694,10 @@ void CDX11VideoProcessor::ReleaseVP()
 	m_DlssNR.ReleaseFeature();
 	m_DlssNR.SetGuides(CDlssNR::Guides{}); // before the shared motion vectors go away
 	m_DlssStabilizer.Release();
+	m_DlssSR.ReleaseFeature();
+	m_DlssSRMotion.Release();
+	m_RenderAhead.Reset();
+	m_DlssNRTimes.Reset();
 
 	m_PSConvColorData.Release();
 	m_pDoviCurvesConstantBuffer.Release();
@@ -714,6 +721,10 @@ void CDX11VideoProcessor::ReleaseDevice()
 	// Shutdown1 takes that device.
 	m_DlssNR.Shutdown();
 	m_bDlssNRActive = false;
+	m_DlssSR.Shutdown();
+	m_bDlssSRActive = false;
+	m_DlssStageTimes.Release();
+	m_pPictureDoneQuery.Release();
 	m_D3D11VP.ReleaseVideoDevice();
 
 	m_StatsBackground.InvalidateDeviceObjects();
@@ -1214,14 +1225,17 @@ void CDX11VideoProcessor::UpdateScalingStrings()
 		w1 = m_srcRectWidth;
 		h1 = m_srcRectHeight;
 	}
+	// DLSS Super Resolution takes over when the picture grows on both axes.
+	const wchar_t* upscaling = (m_bDlssSRActive && w2 > w1 && h2 > h1)
+		? L"DLSS SR" : s_Upscaling11ResIDs[m_iUpscaling].description;
 	m_strShaderX = (w1 == w2) ? nullptr
 		: (w1 > k * w2)
 		? s_Downscaling11ResIDs[m_iDownscaling].description
-		: s_Upscaling11ResIDs[m_iUpscaling].description;
+		: upscaling;
 	m_strShaderY = (h1 == h2) ? nullptr
 		: (h1 > k * h2)
 		? s_Downscaling11ResIDs[m_iDownscaling].description
-		: s_Upscaling11ResIDs[m_iUpscaling].description;
+		: upscaling;
 }
 
 void CDX11VideoProcessor::CalcStatsParams()
@@ -1232,7 +1246,7 @@ void CDX11VideoProcessor::CalcStatsParams()
 		if (S_OK == m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0)) {
 			SIZE charSize = m_Font3D.GetMaxCharMetric();
 			m_StatsRect.right  = m_StatsRect.left + 61 * charSize.cx + 5 + 3;
-			m_StatsRect.bottom = m_StatsRect.top + 20 * charSize.cy + 5 + 3;
+			m_StatsRect.bottom = m_StatsRect.top + m_iStatsLines * charSize.cy + 5 + 3;
 		}
 		m_StatsBackground.Set(m_StatsRect, rtSize, D3DCOLOR_ARGB(80, 0, 0, 0));
 
@@ -1350,6 +1364,7 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 			&& (fs2.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE);
 	}
 	UpdateDlssNR();
+	UpdateDlssSR();
 
 	HRESULT hr2 = m_D3D11VP.InitVideoDevice(m_pDevice, m_pDeviceContext, m_VendorId);
 	DLogIf(FAILED(hr2), L"CDX11VideoProcessor::SetDevice() : InitVideoDevice failed with error {}", HR2Str(hr2));
@@ -2191,6 +2206,8 @@ BOOL CDX11VideoProcessor::GetAlignmentSize(const CMediaType& mt, SIZE& Size)
 
 HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 {
+	m_tickSampleStart = GetPreciseTick(); // render ahead measures the sample from here
+
 	REFERENCE_TIME rtStart, rtEnd;
 	if (FAILED(pSample->GetTime(&rtStart, &rtEnd))) {
 		rtStart = m_pFilter->m_FrameStats.GeTimestamp();
@@ -2653,6 +2670,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	if (field) {
 		m_FieldDrawn = field;
 		m_bDlssNewPicture = true; // not a redraw: the stabilizer may advance
+		m_bDlssSRNewPicture = true;
 	}
 
 	CComPtr<ID3D11Texture2D> pBackBuffer;
@@ -2776,8 +2794,19 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		}
 	}
 
+	// GPU time of each DLSS stage, only while the statistics show it.
+	const bool bTimeDlss = m_bShowStats && (m_bDlssNRActive || m_bDlssSRActive);
+	if (bTimeDlss) {
+		m_DlssStageTimes.Collect(m_pDeviceContext);
+		m_DlssStageTimes.BeginFrame(m_pDevice, m_pDeviceContext);
+	}
+
 	if (!m_renderRect.IsRectEmpty()) {
 		hr = Process(pBackBuffer, m_srcRect, m_videoRect, m_FieldDrawn == 2);
+	}
+
+	if (bTimeDlss) {
+		m_DlssStageTimes.EndFrame(m_pDeviceContext);
 	}
 
 	if (!m_pPSHalfOUtoInterlace) {
@@ -2839,12 +2868,24 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	uint64_t tick3 = GetPreciseTick();
 	m_RenderStats.paintticks = tick3 - tick1;
 
+	// Render ahead: this picture was started early and waits for its time; a
+	// redraw has no time to keep.
+	const bool bHold = field && frameStartTime != INVALID_TIME && RenderAheadActive()
+		&& m_pFilter->m_filterState == State_Running;
+	if (bHold) {
+		MarkPictureSubmitted();
+	}
+
 	if (m_bVBlankBeforePresent && m_pDXGIOutput) {
 		hr = m_pDXGIOutput->WaitForVBlank();
 		DLogIf(FAILED(hr), L"WaitForVBlank failed with error {}", HR2Str(hr));
 	}
 
-	if (m_bAdjustPresentTime) {
+	if (bHold) {
+		// Only the first picture of a sample is started early; a second field
+		// follows it.
+		HoldUntilPresentTime(frameStartTime, field == 1);
+	} else if (m_bAdjustPresentTime) {
 		SyncFrameToStreamTime(frameStartTime);
 	}
 
@@ -2860,6 +2901,87 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	}
 
 	return hr;
+}
+
+int CDX11VideoProcessor::GetRenderAhead()
+{
+	return RenderAheadActive() ? m_RenderAhead.GetAhead() : 0;
+}
+
+// Render ahead, first half: a marker after the picture's last command, which tells
+// when the GPU is done with it -- DLSS SR included, which runs after the render
+// thread has moved on.
+void CDX11VideoProcessor::MarkPictureSubmitted()
+{
+	if (!m_pPictureDoneQuery) {
+		const D3D11_QUERY_DESC desc = { D3D11_QUERY_EVENT, 0 };
+		m_pDevice->CreateQuery(&desc, &m_pPictureDoneQuery);
+	}
+	if (m_pPictureDoneQuery) {
+		m_pDeviceContext->End(m_pPictureDoneQuery);
+		m_pDeviceContext->Flush(); // GetData below does not flush
+	}
+}
+
+// Render ahead, second half: hold the picture until the moment SyncFrameToStreamTime
+// presents at, half a refresh before its time on the reference clock, and learn how
+// long the picture took.
+//
+// Nothing here waits for the GPU. It finishes DLSS SR while the renderer holds the
+// picture, and a picture it has not finished at its present time is presented anyway:
+// the screen shows it once it is done, as it would have without render ahead. Waiting
+// for the GPU instead took that time from the next sample, which measured 25 skipped
+// frames in 20 s of 29.97 fps film whose DLSS chain took 30 ms.
+void CDX11VideoProcessor::HoldUntilPresentTime(const REFERENCE_TIME frameStartTime, const bool bMeasure)
+{
+	const REFERENCE_TIME rtTarget = frameStartTime - (REFERENCE_TIME)m_uHalfRefreshPeriodMs * 10000;
+	const uint64_t tickStart = GetPreciseTick();
+	const double ticksPerMs = GetPreciseTicksPerSecond() / 1000.0;
+	// Never longer than the earliest start plus a frame of 24 fps: past that the
+	// clock has jumped, and the renderer keeps its locks while it waits.
+	const double maxHoldMs = CRenderAhead::kMaxAheadMs + 42.0;
+
+	uint64_t tickDone = 0;
+	bool bQuery = m_pPictureDoneQuery != nullptr;
+	const auto PollDone = [&]() {
+		if (bQuery && !tickDone) {
+			BOOL bDone = FALSE;
+			const HRESULT hr = m_pDeviceContext->GetData(m_pPictureDoneQuery, &bDone, sizeof(bDone), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+			if (hr == S_OK) {
+				tickDone = GetPreciseTick();
+			} else if (FAILED(hr)) {
+				bQuery = false;
+			}
+		}
+	};
+
+	for (;;) {
+		PollDone();
+		if (m_pFilter->m_filterState != State_Running || FAILED(m_pFilter->StreamTime(m_streamTime))) {
+			break;
+		}
+		const REFERENCE_TIME rtRemaining = rtTarget - m_streamTime;
+		if (rtRemaining <= 0 || (GetPreciseTick() - tickStart) / ticksPerMs >= maxHoldMs) {
+			break;
+		}
+		// Every millisecond while the GPU works, then in steps of at most 10 ms,
+		// reading the clock again after each: the reference clock need not run at
+		// the pace of the performance counter.
+		m_PreciseSleep.Sleep(std::min(rtRemaining / 10000.0, tickDone ? 10.0 : 1.0));
+	}
+
+	if (!tickDone) {
+		m_RenderAhead.CountLate(); // not done at its present time
+	}
+	if (bMeasure) {
+		// Exact when the GPU was done in time. Otherwise the picture took at least
+		// until now, and the start moves earlier until pictures are done in time.
+		const uint64_t tickEnd = tickDone ? tickDone : GetPreciseTick();
+		const REFERENCE_TIME rtFrameDur = m_pFilter->m_FrameStats.GetAverageFrameDuration();
+		m_RenderAhead.AddLatency((tickEnd - m_tickSampleStart) / ticksPerMs, (double)m_uHalfRefreshPeriodMs, rtFrameDur / 10000.0);
+	}
+
+	m_rtHeld += (REFERENCE_TIME)((GetPreciseTick() - tickStart) * 10000000.0 / GetPreciseTicksPerSecond());
 }
 
 HRESULT CDX11VideoProcessor::FillBlack()
@@ -2931,7 +3053,8 @@ void CDX11VideoProcessor::UpdateTexures()
 		// With DLSS active the hardware VP must not upscale: the network is meant
 		// to run at source resolution, and letting the VP scale first would both
 		// cost far more and defeat the point.
-		if (m_bVPScaling && !m_bDlssNRActive) {
+		// Nor with DLSS Super Resolution, which scales from the source itself.
+		if (m_bVPScaling && !m_bDlssNRActive && !m_bDlssSRActive) {
 			CSize texsize = m_videoRect.Size();
 			hr = m_TexConvertOutput.CheckCreate(m_pDevice, m_D3D11OutputFmt, texsize.cx, texsize.cy, Tex2D_DefaultShaderRTarget);
 			if (FAILED(hr)) {
@@ -3539,7 +3662,9 @@ HRESULT CDX11VideoProcessor::DlssNRPass(Tex2D_t* pInputTexture, const CRect& rSr
 	m_bDlssNewPicture = false;
 	if (bStabilize && bNewPicture) {
 		const CDlssStabilizer::Motion active = m_DlssStabilizer.ActiveMotion();
+		m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::NRMotion);
 		m_DlssStabilizer.PrepareMotion(m_pDeviceContext, m_TexDlssIn.pShaderResource);
+		m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::NRMotion);
 		if (m_DlssStabilizer.ActiveMotion() != active) {
 			UpdateStatsStatic(); // Optical Flow gave way to the detector
 		}
@@ -3564,14 +3689,164 @@ HRESULT CDX11VideoProcessor::DlssNRPass(Tex2D_t* pInputTexture, const CRect& rSr
 		UpdateStatsStatic();
 		return E_FAIL;
 	}
+	// The network's own time. Its wait for the input is the Direct3D 11 work queued
+	// before it -- the copy, and Optical Flow, which has its own timestamps.
+	m_DlssNRTimes.Add(m_DlssNR.LastTiming().recordMs + m_DlssNR.LastTiming().gpuWaitMs);
 
 	if (bStabilize) {
+		m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::NRStabilize);
 		m_DlssStabilizer.Stabilize(m_pDeviceContext, m_TexDlssIn.pShaderResource, m_TexDlssOut.pShaderResource,
 			(float)m_iDlssNRStabilizer / DLSSNR_STAB_MAX, bNewPicture);
+		m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::NRStabilize);
 		*ppResult = m_DlssStabilizer.GetResult();
 	} else {
 		*ppResult = &m_TexDlssOut;
 	}
+	return S_OK;
+}
+
+std::wstring CDX11VideoProcessor::GetDlssSRStatus()
+{
+	if (!m_bDlssSR) {
+		return {};
+	}
+	if (!DlssSRSupportedHere()) {
+		return L"not available on this adapter";
+	}
+	return m_DlssSR.GetStatusLine();
+}
+
+bool CDX11VideoProcessor::DlssSRSupportedHere() const
+{
+#ifndef _WIN64
+	return false; // the NGX runtime is x64 only
+#else
+	// NGX writes the upscaled picture through a typed UAV, as for DLSS 5 NR.
+	return m_pDevice
+		&& m_VendorId == PCIV_NVIDIA
+		&& m_FeatureLevel >= D3D_FEATURE_LEVEL_11_0
+		&& m_bDlssNRUavOk;
+#endif
+}
+
+// Load or drop the DLSS Super Resolution session to match the setting. Toggling
+// only drops the feature; the session goes with the device or another DLL.
+void CDX11VideoProcessor::UpdateDlssSR()
+{
+	if (!m_bDlssSR || !DlssSRSupportedHere()) {
+		m_DlssSR.ReleaseFeature();
+		m_DlssSRMotion.Release();
+		m_strDlssSRMotion.clear();
+		m_bDlssSRActive = false;
+		return;
+	}
+	if (!m_DlssSR.IsInitialised()) {
+		m_DlssSR.Init(m_pDevice, m_strDlssSRDllPath.c_str());
+	}
+	m_bDlssSRActive = m_DlssSR.IsInitialised();
+}
+
+HRESULT CDX11VideoProcessor::DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSrc, const CRect& dstRect, const int rotation, Tex2D_t** ppResult)
+{
+	if (!pInputTexture || !ppResult) {
+		return E_POINTER;
+	}
+
+	// Sizes before rotation: ResizeShaderPass turns the picture afterwards.
+	const bool bTurned = (rotation == 90 || rotation == 270);
+	const UINT inW = rSrc.Width(), inH = rSrc.Height();
+	UINT outW = bTurned ? dstRect.Height() : dstRect.Width();
+	UINT outH = bTurned ? dstRect.Width() : dstRect.Height();
+	if (!inW || !inH || outW <= inW || outH <= inH) {
+		return S_FALSE;   // DLSS only enlarges; the renderer's downscalers do the rest
+	}
+
+	// Past four times the source the output stops there, and the resize shaders
+	// cover what is left (measured: 4.5x still runs, but nothing films need).
+	const double reach = std::min({ 4.0 * inW / outW, 4.0 * inH / outH, 7680.0 / outW, 4320.0 / outH, 1.0 });
+	outW = std::max<UINT>(inW + 1, (UINT)std::lround(outW * reach));
+	outH = std::max<UINT>(inH + 1, (UINT)std::lround(outH * reach));
+
+	const unsigned preset = (unsigned)m_iDlssSRPreset;
+	if (!m_DlssSR.MatchesFeature(inW, inH, outW, outH, preset)) {
+		if (m_DlssSR.IsRefused(inW, inH, outW, outH, preset)) {
+			return S_FALSE;   // failed before for these sizes: the resize shaders do the job
+		}
+		if (!m_DlssSR.CreateFeature(inW, inH, outW, outH, preset)) {
+			UpdateStatsStatic();
+			return S_FALSE;
+		}
+		m_bDlssSRNewPicture = true;   // a new feature starts its history on this picture
+		m_DlssSRMotion.Reset();
+		UpdateScalingStrings();
+		UpdateStatsStatic();
+	}
+
+	Tex2D_t* pInput = m_DlssSR.GetInput();
+	HRESULT hr = TextureCopyRect(*pInputTexture, pInput->pTexture, rSrc, CRect(0, 0, inW, inH), m_pPS_Simple, nullptr, 0, false);
+	if (FAILED(hr)) {
+		return hr;
+	}
+
+	// Motion only for a new picture: a redraw shows the same one, which has not
+	// moved. DLSS 5 NR's Optical Flow vectors are lent when they describe this very
+	// picture at this size; otherwise a motion-only estimator of its own runs.
+	std::wstring motion = L"no vectors";
+	ID3D11Texture2D* pMotion = nullptr;
+	const bool bNewPicture = m_bDlssSRNewPicture;
+	m_bDlssSRNewPicture = false;
+	if (bNewPicture) {
+		ID3D11Texture2D* pLent = (m_bDlssNRActive && !m_bDlssNRAfterUpscale && m_DlssStabilizer.IsCreated()
+			&& m_TexDlssIn.desc.Width == inW && m_TexDlssIn.desc.Height == inH) ? m_DlssStabilizer.GetMotionVectors() : nullptr;
+		if (pLent) {
+			m_DlssSRMotion.Release();
+			pMotion = pLent;
+			motion = L"OF from DLSS 5 NR";
+		} else {
+			// The stabilizer's own flow, about 540 lines: finer flow -- the source
+			// size, a vector per pixel, the slowest search -- measured no better for
+			// DLSS in --tsrq. DLSS does not read the confidence map, so no backward
+			// flow and no cost.
+			CDlssStabilizer::FlowSettings flow;
+			flow.bidirectional = false;
+			flow.cost          = false;
+			if (!m_DlssSRMotion.Matches(inW, inH, CDlssStabilizer::Motion::OpticalFlow, true, flow)) {
+				m_DlssSRMotion.Create(m_pDevice, m_pDeviceContext, inW, inH, CDlssStabilizer::Motion::OpticalFlow,
+					m_pVSimpleInputLayout, m_pVS_Simple, m_pSamplerPoint, m_pSamplerLinear, true, flow);
+			}
+			if (m_DlssSRMotion.IsCreated()) {
+				m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::SRMotion);
+				m_DlssSRMotion.PrepareMotion(m_pDeviceContext, pInput->pShaderResource);
+				m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::SRMotion);
+				pMotion = m_DlssSRMotion.GetMotionVectors();
+				motion = pMotion ? std::wstring(L"OF") : m_DlssSRMotion.GetStatusLine();
+			}
+		}
+		if (motion != m_strDlssSRMotion) {
+			m_strDlssSRMotion = motion;
+			UpdateStatsStatic();
+		}
+	}
+
+	// NGX binds the textures on its own pipeline state; nothing of the renderer's
+	// may still hold them.
+	ID3D11ShaderResourceView* nullSRVs[4] = {};
+	m_pDeviceContext->PSSetShaderResources(0, std::size(nullSRVs), nullSRVs);
+	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+
+	const float frameMs = (m_rtAvgTimePerFrame > 0) ? (float)(m_rtAvgTimePerFrame / 10000.0) : 41.7f;
+	m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::SR);
+	const bool bEvaluated = m_DlssSR.Evaluate(pMotion, frameMs);
+	m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::SR);
+	if (!bEvaluated) {
+		// Latch off rather than failing on every picture.
+		m_bDlssSRActive = false;
+		UpdateScalingStrings();
+		UpdateStatsStatic();
+		return E_FAIL;
+	}
+
+	*ppResult = m_DlssSR.GetOutput();
 	return S_OK;
 }
 
@@ -3592,7 +3867,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 				(m_TexConvertOutput.desc.Width != dstRect.Width() || m_TexConvertOutput.desc.Height != dstRect.Height() || m_bFlip
 				|| dstRect.right > m_windowRect.right || dstRect.bottom > m_windowRect.bottom)
 				|| (m_bHdrPassthroughSupport && (m_bHdrPassthrough || m_bHdrLocalToneMapping)) // At least on Nvidia we can sometimes get the "D3D11: Removing Device" error here when HDR Passthrough.
-				|| (m_bDlssNRActive && bAllowDlss); // the DLSS pass needs the intermediate texture
+				|| ((m_bDlssNRActive || m_bDlssSRActive) && bAllowDlss); // the DLSS passes need the intermediate texture
 			if (!bNeedShaderTransform && !numSteps) {
 				m_bVPScalingUseShaders = false;
 				hr = D3D11VPPass(pRenderTarget, rSrc, dstRect, second);
@@ -3622,6 +3897,17 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 		if (S_OK == DlssNRPass(pInputTexture, rSrc, &pDlssResult) && pDlssResult) {
 			pInputTexture = pDlssResult;
 			rSrc.SetRect(0, 0, pDlssResult->desc.Width, pDlssResult->desc.Height);
+		}
+	}
+
+	// DLSS Super Resolution in place of the resize shaders. ResizeShaderPass below
+	// is then left with rotating, flipping and placing the picture, and with any
+	// scale DLSS does not cover.
+	if (m_bDlssSRActive && bAllowDlss && pInputTexture) {
+		Tex2D_t* pSRResult = nullptr;
+		if (S_OK == DlssSRPass(pInputTexture, rSrc, dstRect, rotation, &pSRResult) && pSRResult) {
+			pInputTexture = pSRResult;
+			rSrc.SetRect(0, 0, pSRResult->desc.Width, pSRResult->desc.Height);
 		}
 	}
 
@@ -4144,6 +4430,10 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	bool changeDlssReload        = false;
 	bool changeDlssFeature       = false;
 
+	const bool bDlssNRActiveBefore = m_bDlssNRActive;
+	const bool bDlssSRActiveBefore = m_bDlssSRActive;
+	const bool bRenderAheadBefore  = m_bDlssRenderAhead;
+
 	// settings that do not require preparation
 	m_bShowStats           = config.bShowStats;
 	m_bDeintDouble         = config.bDeintDouble;
@@ -4191,6 +4481,34 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		}
 	}
 
+	{
+		// DLSS Super Resolution. The preset is baked into the feature, and
+		// DlssSRPass makes a new one on the next picture; only another DLL ends
+		// the session.
+		bool bUpdateSR = false;
+		if (m_strDlssSRDllPath != config.szDlssSRDllPath) {
+			m_strDlssSRDllPath = config.szDlssSRDllPath;
+			m_DlssSR.Shutdown();
+			m_bDlssSRActive = false;
+			bUpdateSR = true;
+		}
+		if (config.bDlssSR != m_bDlssSR) {
+			m_bDlssSR = config.bDlssSR;
+			bUpdateSR = true;
+		}
+		m_iDlssSRPreset = config.iDlssSRPreset;
+		if (bUpdateSR && m_pDevice) {
+			const bool bWasActive = m_bDlssSRActive;
+			UpdateDlssSR();
+			if (m_bDlssSRActive != bWasActive) {
+				// The hardware video processor stops or starts scaling: the same
+				// rebuild as a DLSS 5 NR toggle.
+				changeTextures = true;
+			}
+			UpdateScalingStrings();
+		}
+	}
+
 	if (config.iResizeStats != m_iResizeStats) {
 		m_iResizeStats = config.iResizeStats;
 		changeResizeStats = true;
@@ -4205,6 +4523,14 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	} else if (changeDlssFeature) {
 		m_DlssNR.ReleaseFeature();
 		changeTextures = true;
+	}
+
+	m_bDlssRenderAhead = config.bDlssRenderAhead;
+	if (m_bDlssRenderAhead != bRenderAheadBefore || m_bDlssNRActive != bDlssNRActiveBefore
+			|| m_bDlssSRActive != bDlssSRActiveBefore || changeDlssFeature) {
+		// What render ahead measures has changed: it starts over.
+		m_RenderAhead.Reset();
+		m_DlssNRTimes.Reset();
 	}
 
 	if (config.iTexFormat != m_iTexFormat) {
@@ -4466,6 +4792,8 @@ void CDX11VideoProcessor::Flush()
 	m_rtStart = 0;
 	m_DlssNR.RequestReset();
 	m_DlssStabilizer.Reset();
+	m_DlssSR.RequestReset();
+	m_DlssSRMotion.Reset();
 
 	m_DoviExtensionMetadata = {};
 #ifndef NDEBUG
@@ -4649,6 +4977,12 @@ void CDX11VideoProcessor::UpdateStatsStatic()
 			m_strStatsVProc += std::format(L"\nDLSS 5 NR     : {}", m_DlssNR.GetStatusLine());
 		}
 	}
+	if (m_bDlssSR) {
+		m_strStatsVProc += L"\nDLSS SR       : " + m_DlssSR.GetStatsLine();
+		if (m_bDlssSRActive && m_DlssSR.IsFeatureReady() && !m_strDlssSRMotion.empty()) {
+			m_strStatsVProc += L", " + m_strDlssSRMotion;
+		}
+	}
 
 		if (SourceIsHDR() || m_bVPUseRTXVideoHDR) {
 			m_strStatsHDR.assign(L"\nHDR processing: ");
@@ -4775,14 +5109,10 @@ void CDX11VideoProcessor::UpdateStatsPostProc()
 }
 */
 
-HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
+std::wstring CDX11VideoProcessor::GetStatsText()
 {
-	if (m_windowRect.IsRectEmpty()) {
-		return E_ABORT;
-	}
-
 	std::wstring str;
-	str.reserve(700);
+	str.reserve(800);
 	str.assign(m_strStatsHeader);
 	str.append(m_strStatsDispInfo);
 	str += std::format(L"\nGraph. Adapter: {}", m_strAdapterDescription);
@@ -4809,7 +5139,9 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 		str += std::format(L"\nScaling       : {}x{} -> {}x{}", m_srcRectWidth, m_srcRectHeight, dstW, dstH);
 	}
 	if (m_srcRectWidth != dstW || m_srcRectHeight != dstH) {
-		if (m_D3D11VP.IsReady() && m_bVPScaling && !m_bVPScalingUseShaders) {
+		// With DLSS Super Resolution on, the video processor never scales, and the
+		// resize after DLSS reads as no scaling at all.
+		if (m_D3D11VP.IsReady() && m_bVPScaling && !m_bVPScalingUseShaders && !m_bDlssSRActive) {
 			str.append(L" D3D11");
 			if (m_bVPUseSuperRes) {
 				str.append(L" SuperResolution*");
@@ -4874,6 +5206,57 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 		m_RenderStats.t5 * 1000 / GetPreciseTicksPerSecond(),
 		m_RenderStats.t6 * 1000 / GetPreciseTicksPerSecond());
 #endif
+
+	if (m_bDlssNRActive || m_bDlssSRActive) {
+		// Where the DLSS time goes: DLSS 5 NR as the renderer waits for it, the
+		// other stages on the GPU. Optical Flow shows under the stabilizer when
+		// it serves DLSS 5 NR, as OF when DLSS SR runs its own.
+		std::wstring times;
+		const auto AddTime = [&](const wchar_t* name, double ms) {
+			if (ms >= 0) {
+				times += std::format(L"{}{} {:.1f}", times.empty() ? L"" : L", ", name, ms);
+			}
+		};
+		if (m_bDlssNRActive) {
+			AddTime(L"NR", m_DlssNRTimes.Mean());
+			const double motion = m_DlssStageTimes.MeanMs(CGpuStageTimes::NRMotion);
+			const double stabilize = m_DlssStageTimes.MeanMs(CGpuStageTimes::NRStabilize);
+			AddTime(L"stabilizer", (motion >= 0 || stabilize >= 0) ? std::max(motion, 0.0) + std::max(stabilize, 0.0) : -1.0);
+		}
+		if (m_bDlssSRActive) {
+			AddTime(L"OF", m_DlssStageTimes.MeanMs(CGpuStageTimes::SRMotion));
+			AddTime(L"SR", m_DlssStageTimes.MeanMs(CGpuStageTimes::SR));
+		}
+		if (!times.empty()) {
+			str += L"\nDLSS (ms)     : " + times;
+		}
+
+		if (!m_bDlssRenderAhead) {
+			str.append(L"\nRender ahead  : off");
+		} else if (m_RenderAhead.MeanLatencyMs() >= 0) {
+			str += std::format(L"\nRender ahead  : {:.0f} ms (ready in {:.1f}, max {:.1f}), late {}",
+				m_RenderAhead.GetAhead() / 10000.0, m_RenderAhead.MeanLatencyMs(), m_RenderAhead.MaxLatencyMs(),
+				m_RenderAhead.LateCount());
+		}
+	}
+
+	return str;
+}
+
+HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
+{
+	if (m_windowRect.IsRectEmpty()) {
+		return E_ABORT;
+	}
+
+	const std::wstring str = GetStatsText();
+
+	// The DLSS lines can take the text past the box it was sized for.
+	const int lines = 1 + (int)std::count(str.begin(), str.end(), L'\n');
+	if (lines > m_iStatsLines) {
+		m_iStatsLines = lines;
+		CalcStatsParams();
+	}
 
 	ID3D11RenderTargetView* pRenderTargetView = nullptr;
 	HRESULT hr = m_pDevice->CreateRenderTargetView(pRenderTarget, nullptr, &pRenderTargetView);

@@ -168,6 +168,12 @@ void CVRMainPPage::EnableControls()
 	GetDlgItem(IDC_EDIT1).EnableWindow(m_SetsPP.bConvertToSdr);
 	GetDlgItem(IDC_SLIDER2).EnableWindow(m_SetsPP.bConvertToSdr);
 	GetDlgItem(IDC_EDIT_DISPLAYMAX).EnableWindow(m_SetsPP.bHdrLocalToneMapping);
+
+	// DLSS Super Resolution, set on the DLSS 5 page, enlarges the picture in
+	// Direct3D 11 mode; the Upscaling method then only stands in where it cannot.
+	const BOOL bUpscalingList = !(m_SetsPP.bUseD3D11 && m_SetsPP.bDlssSR);
+	GetDlgItem(IDC_STATIC39).EnableWindow(bUpscalingList);
+	GetDlgItem(IDC_COMBO2).EnableWindow(bUpscalingList);
 }
 
 HRESULT CVRMainPPage::OnConnect(IUnknown *pUnk)
@@ -316,7 +322,9 @@ HRESULT CVRMainPPage::OnActivate()
 		"when the DVXA2/D3D11 Video Processor is not active.");
 	AddHint(IDC_COMBO2,
 		L"Used to increase image size when the\n"
-		"DVXA2/D3D11 Video Processor is not used for resizing.");
+		"DVXA2/D3D11 Video Processor is not used for resizing.\n"
+		"Greyed while DLSS Super Resolution handles upscaling\n"
+		"(DLSS 5 page); it then only stands in where DLSS cannot run.");
 	AddHint(IDC_COMBO3,
 		L"Used to reduce image size when the\n"
 		"DVXA2/D3D11 Video Processor is not used for resizing.");
@@ -329,6 +337,15 @@ HRESULT CVRMainPPage::OnActivate()
 
 INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	if (uMsg == WM_SHOWWINDOW && wParam && m_pVideoRenderer) {
+		// Back from the DLSS 5 page: DLSS Super Resolution may have been switched
+		// there and applied. Only those fields are taken, not edits made here.
+		Settings_t current;
+		m_pVideoRenderer->GetSettings(current);
+		CopyDlssSettings(m_SetsPP, current);
+		EnableControls();
+	}
+
 	if (uMsg == WM_COMMAND) {
 		LRESULT lValue;
 		const int nID = LOWORD(wParam);

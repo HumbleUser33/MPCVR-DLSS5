@@ -57,6 +57,12 @@
     <ClCompile Include="DLSS\DlssStabilizer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DLSS\DlssSR.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DLSS\DlssTiming.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DX11VideoProcessor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -177,6 +183,12 @@
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DlssSR.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DlssTiming.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\NGXTypes.h">

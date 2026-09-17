@@ -259,6 +259,9 @@ void CBaseVideoRenderer2::OnRenderEnd(IMediaSample *pMediaSample)
     // not enough as figures can go 9,10,9,9,83,9 and we must disregard 83
 
     int tr = (timeGetTime() - m_tRenderStart)*10000;   // convert mSec->UNITS
+    // Holding a finished picture for its time is not drawing (render ahead).
+    tr = std::max(0, tr - m_trRenderHeld);
+    m_trRenderHeld = 0;
 	if (tr < m_trRenderAvg*32 || tr < m_trRenderLast*32) {
 		// But in reality, the rendering time can cyclically increase and decrease by 25 times. For example : 5 125 6 127 5 126.
         m_trRenderAvg = (tr + (AVGPERIOD-1)*m_trRenderAvg)/AVGPERIOD;
@@ -710,13 +713,19 @@ HRESULT CBaseVideoRenderer2::ShouldDrawSampleNow(IMediaSample *pMediaSample,
             }
 
             int Delay = -trTrueLate;
-            Result = Delay<=0 ? S_OK : S_FALSE;     // OK = draw now, FALSE = wait
+
+            // Render ahead: hand the sample over this much earlier. The renderer
+            // holds the finished picture until its time, so the picture is still
+            // shown when due, and every decision above and the statistics below
+            // keep working from that time.
+            const int trAhead = GetRenderAhead();
+            Result = (Delay - trAhead)<=0 ? S_OK : S_FALSE;     // OK = draw now, FALSE = wait
 
             m_trWaitAvg = trWaitAvg;
 
             // Predict when it will actually be drawn and update frame stats
 
-            if (Result==S_FALSE) {   // We are going to wait
+            if (Delay>0) {   // We are going to wait
                 trFrame = TimeDiff(*ptrStart-m_trLastDraw);
                 m_trLastDraw = *ptrStart;
             } else {
@@ -733,6 +742,10 @@ HRESULT CBaseVideoRenderer2::ShouldDrawSampleNow(IMediaSample *pMediaSample,
                 iAccuracy = trTrueLate;     // trRealStream-RememberStampForPerf;
             }
             PreparePerformanceData(iAccuracy, trFrame);
+
+            if (Result==S_FALSE && trAhead>0) {
+                *ptrStart = std::max<REFERENCE_TIME>(0, *ptrStart - trAhead);   // when the clock wakes us
+            }
         }
         return Result;
     }

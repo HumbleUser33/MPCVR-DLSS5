@@ -84,6 +84,10 @@
 #define OPT_DlssNRStabilizer               L"DlssNRStabilizerStrength"
 #define OPT_DlssNRMotion                   L"DlssNRMotionSource"
 #define OPT_DlssNRMotionVectors            L"DlssNRMotionVectorsToNetwork"
+#define OPT_DlssSR                         L"DlssSRUpscaling"
+#define OPT_DlssSRPreset                   L"DlssSRPreset"
+#define OPT_DlssSRDllPath                  L"DlssSRDllPath"
+#define OPT_DlssRenderAhead                L"DlssRenderAhead"
 
 static std::atomic_int g_nInstance = 0;
 
@@ -344,6 +348,23 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 				m_Sets.szDlssNRDllPath[0] = L'\0';
 			}
 			m_Sets.szDlssNRDllPath[std::size(m_Sets.szDlssNRDllPath) - 1] = L'\0';
+		}
+		// DLSS Super Resolution, x64 as well: the NGX runtime has no 32-bit build.
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssSR, dw)) {
+			m_Sets.bDlssSR = !!dw;
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssSRPreset, dw)) {
+			m_Sets.iDlssSRPreset = ((int)dw >= DLSSSR_PRESET_J && (int)dw <= DLSSSR_PRESET_M) ? (int)dw : DLSSSR_PRESET_DEF;
+		}
+		{
+			ULONG nChars = std::size(m_Sets.szDlssSRDllPath);
+			if (ERROR_SUCCESS != key.QueryStringValue(OPT_DlssSRDllPath, m_Sets.szDlssSRDllPath, &nChars)) {
+				m_Sets.szDlssSRDllPath[0] = L'\0';
+			}
+			m_Sets.szDlssSRDllPath[std::size(m_Sets.szDlssSRDllPath) - 1] = L'\0';
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssRenderAhead, dw)) {
+			m_Sets.bDlssRenderAhead = !!dw;
 		}
 #endif
 	}
@@ -649,6 +670,7 @@ HRESULT CMpcVideoRenderer::DoRenderSample(IMediaSample* pSample)
 	}
 
 	HRESULT hr = m_VideoProcessor->ProcessSample(pSample);
+	m_trRenderHeld = (int)std::min<REFERENCE_TIME>(m_VideoProcessor->TakeHeldTime(), INT_MAX);
 
 	if (SUCCEEDED(hr)) {
 		m_bValidBuffer = true;
@@ -1496,6 +1518,10 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 		key.SetDWORDValue(OPT_DlssNRMotionVectors, m_Sets.bDlssNRMotionVectors);
 		key.SetDWORDValue(OPT_DlssNRToggleKey,     m_Sets.iDlssNRToggleKey);
 		key.SetStringValue(OPT_DlssNRDllPath,      m_Sets.szDlssNRDllPath);
+		key.SetDWORDValue(OPT_DlssSR,              m_Sets.bDlssSR);
+		key.SetDWORDValue(OPT_DlssSRPreset,        m_Sets.iDlssSRPreset);
+		key.SetStringValue(OPT_DlssSRDllPath,      m_Sets.szDlssSRDllPath);
+		key.SetDWORDValue(OPT_DlssRenderAhead,     m_Sets.bDlssRenderAhead);
 #endif
 	}
 
@@ -1591,12 +1617,18 @@ STDMETHODIMP CMpcVideoRenderer::Flt_GetString(LPCSTR field, LPWSTR* value, unsig
 {
 	CheckPointer(value, E_POINTER);
 
-	// One line describing the DLSS 5 NR session, for the property page.
-	if (!strcmp(field, "dlssStatus")) {
+	// One line describing the DLSS 5 NR session, or the DLSS Super Resolution one,
+	// for the property page. "statsText" is the statistics as drawn on the picture,
+	// for tools that log them.
+	const bool bNR = !strcmp(field, "dlssStatus");
+	const bool bSR = !strcmp(field, "dlssSRStatus");
+	const bool bStats = !strcmp(field, "statsText");
+	if (bNR || bSR || bStats) {
 		CAutoLock cRendererLock(&m_RendererLock);
 		std::wstring str;
 		if (m_VideoProcessor) {
-			str = m_VideoProcessor->GetDlssStatus();
+			str = bStats ? m_VideoProcessor->GetStatsText()
+				: bSR ? m_VideoProcessor->GetDlssSRStatus() : m_VideoProcessor->GetDlssStatus();
 		}
 		const size_t len = str.size();
 		LPWSTR buf = (LPWSTR)CoTaskMemAlloc((len + 1) * sizeof(WCHAR));

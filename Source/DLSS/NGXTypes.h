@@ -67,6 +67,38 @@ constexpr uint32_t NGX_SDK_VERSION_FALLBACK = 0x13;
 
 constexpr unsigned long long NGX_DLSSNR_APPID = 141959980ull;
 
+// DLSS Super Resolution, through the driver core.
+constexpr uint32_t NGX_FEATURE_SUPERSAMPLING = 1;
+
+// NVSDK_NGX_PerfQuality_Value: the scale a feature is tuned for.
+enum : int {
+	NGX_PERFQUALITY_MaxPerf          = 0,   // 2x
+	NGX_PERFQUALITY_Balanced         = 1,   // 1.72x
+	NGX_PERFQUALITY_MaxQuality       = 2,   // 1.5x
+	NGX_PERFQUALITY_UltraPerformance = 3,   // 3x
+	NGX_PERFQUALITY_UltraQuality     = 4,
+	NGX_PERFQUALITY_DLAA             = 5,   // 1x
+};
+
+// NVSDK_NGX_DLSS_Feature_Flags.
+enum : int {
+	NGX_DLSS_FLAG_IsHDR         = 1 << 0,
+	NGX_DLSS_FLAG_MVLowRes      = 1 << 1,   // vectors at the input size
+	NGX_DLSS_FLAG_MVJittered    = 1 << 2,
+	NGX_DLSS_FLAG_DepthInverted = 1 << 3,
+	NGX_DLSS_FLAG_AutoExposure  = 1 << 6,
+};
+
+// NVSDK_NGX_DLSS_Hint_Render_Preset: 0 lets DLSS choose for the scale; J and K
+// are the first transformer models, L and M the second (DLSS 4.5).
+enum : unsigned int {
+	NGX_DLSS_PRESET_Default = 0,
+	NGX_DLSS_PRESET_J = 10,
+	NGX_DLSS_PRESET_K = 11,
+	NGX_DLSS_PRESET_L = 12,
+	NGX_DLSS_PRESET_M = 13,
+};
+
 // ------------------------------------------------------------------ structs
 
 struct NVSDK_NGX_Handle { unsigned int Id; };
@@ -189,6 +221,14 @@ typedef NVSDK_NGX_Result (__cdecl* PFN_NGX_D3D11_GetFeatureRequirements)(
 	IDXGIAdapter* adapter, const NVSDK_NGX_FeatureDiscoveryInfo* info,
 	NVSDK_NGX_FeatureRequirement* out);
 typedef uint32_t (__cdecl* PFN_NGX_GetU32)(void);
+
+// The driver core's D3D11 session, for DLSS Super Resolution: the core loads
+// nvngx_dlss.dll itself from the paths in FeatureCommonInfo. Its Init_Ext takes
+// the snippet ordering, PFN_NGX_D3D11_Init_Ext above; its plain Init answers
+// OutOfDate once a current snippet is on the path, and its Init_ProjectID with the
+// SDK's documented argument order crashes (measured, tools/dlssnr_probe --tsr).
+typedef NVSDK_NGX_Result (__cdecl* PFN_NGX_D3D11_GetCapabilityParameters)(NVSDK_NGX_Parameter** out);
+typedef NVSDK_NGX_Result (__cdecl* PFN_NGX_D3D11_Shutdown)(void);
 
 // D3D12 is the only backend that actually works in this snippet build: its
 // D3D11 entry points refuse without ever querying the driver.
