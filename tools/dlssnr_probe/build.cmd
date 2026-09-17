@@ -35,9 +35,25 @@ fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_stab_flowframe.cso "%SH%\ps_dlss_stabilize
 fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_stab_flowmotion.cso "%SH%\ps_dlss_stabilize.hlsl" /DPASS=1 >NUL || EXIT /B 1
 fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_stab_stabilize.cso "%SH%\ps_dlss_stabilize.hlsl" /DPASS=2 >NUL || EXIT /B 1
 rc /nologo /fo detector_shaders.res detector_shaders.rc || EXIT /B 1
+
+REM ONNX Runtime with DirectML, when it has been fetched into external\onnxruntime.
+REM Without it the suite builds and runs, minus the neural rows.
+SET ORT=..\..\external\onnxruntime\onnxruntime
+SET DML=..\..\external\onnxruntime\directml
+SET ORTFLAGS=
+SET ORTLIB=
+IF EXIST "%ORT%\build\native\include\onnxruntime_cxx_api.h" (
+  ECHO   with ONNX Runtime and DirectML
+  SET ORTFLAGS=/DHAVE_ONNXRUNTIME /I%ORT%\build\native\include
+  SET ORTLIB=%ORT%\runtimes\win-x64\native\onnxruntime.lib
+  COPY /Y "%ORT%\runtimes\win-x64\native\onnxruntime.dll" . >NUL
+  COPY /Y "%DML%\bin\x64-win\DirectML.dll" . >NUL
+)
+
 cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 ^
-   /DUNICODE /D_UNICODE /I"%SRC%" harness.cpp ^
+   /DUNICODE /D_UNICODE /I"%SRC%" %ORTFLAGS% harness.cpp %ORTLIB% ^
    "%SRC%\DLSS\DlssNR.cpp" "%SRC%\DLSS\DlssMotionMask.cpp" "%SRC%\DLSS\DlssOpticalFlow.cpp" "%SRC%\DLSS\DlssStabilizer.cpp" ^
+   "%SRC%\DLSS\DlssSR.cpp" ^
    "%SRC%\DX11Helper.cpp" "%SRC%\Utils\Util.cpp" ^
    "%MH%\hook.c" "%MH%\buffer.c" "%MH%\trampoline.c" "%MH%\hde\hde64.c" ^
    detector_shaders.res /Fe:dlssnr_harness.exe || EXIT /B 1
@@ -48,10 +64,15 @@ cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x
    "%SRC%\D3D11VP.cpp" "%SRC%\DX11Helper.cpp" ^
    /Fe:vp_rebuild_test.exe /link strmiids.lib || EXIT /B 1
 
+ECHO Building the playback test (render ahead in a DirectShow graph, needs the x64 filter built)...
+cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /DNDEBUG ^
+   /DUNICODE /D_UNICODE /I"%SRC%" /I"..\..\external\BaseClasses" playback_test.cpp ^
+   /Fe:playback_test.exe /link "..\..\_bin\lib\Release_x64\BaseClasses.lib" || EXIT /B 1
+
 DEL /Q *.obj *.exp *.cso *.res 2>NUL
 
 ECHO.
-ECHO Run dlssnr_harness.exe and vp_rebuild_test.exe before putting a build in the player.
+ECHO Run dlssnr_harness.exe, vp_rebuild_test.exe and playback_test.exe before putting a build in the player.
 ECHO.
 ECHO Done. Usage:
 ECHO   dlssnr_probe.exe                  report only, nothing altered

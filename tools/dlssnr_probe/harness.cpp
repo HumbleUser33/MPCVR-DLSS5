@@ -999,6 +999,9 @@ static int RunOracle(ID3D11Device* dev, ID3D11DeviceContext* ctx, CDlssNR& dlss,
 #include "effect_suite.inl"
 #include "flow_suite.inl"
 #include "stab_suite.inl"
+#include "upscale_suite.inl"
+#include "sr_suite.inl"
+#include "pipeline_suite.inl"
 
 int wmain(int argc, wchar_t** argv)
 {
@@ -1042,14 +1045,22 @@ int wmain(int argc, wchar_t** argv)
 	}
 
 	// ---- session ----------------------------------------------------------
-	Head("CDlssNR::Init");
+	// --nonr leaves DLSS 5 NR out, for the suites that do not need it: its
+	// architecture hook and its session in the same NGX runtime are then absent.
+	bool skipNR = false;
+	for (int i = 1; i < argc; i++) {
+		if (!wcscmp(argv[i], L"--nonr")) skipNR = true;
+	}
 	CDlssNR dlss;
-	const bool inited = dlss.Init(dev, dllPath, true);
-	Check(inited, "Init");
-	Dump(dlss);
-	if (!inited) {
-		printf("\n  Cannot continue without a session.\n");
-		return 2;
+	if (!skipNR) {
+		Head("CDlssNR::Init");
+		const bool inited = dlss.Init(dev, dllPath, true);
+		Check(inited, "Init");
+		Dump(dlss);
+		if (!inited) {
+			printf("\n  Cannot continue without a session.\n");
+			return 2;
+		}
 	}
 
 	auto hasArg = [&](const wchar_t* name) {
@@ -1067,6 +1078,17 @@ int wmain(int argc, wchar_t** argv)
 	const bool temporalStab = hasArg(L"--tstab");
 	const bool temporalStabPort = hasArg(L"--tstabport");
 	const bool temporalStabBench = hasArg(L"--tstabbench");
+	const bool temporalUpscale = hasArg(L"--tupscale");
+	const bool temporalUpscaleCost = hasArg(L"--tupscalecost");
+	const bool temporalSR = hasArg(L"--tsr");
+	const bool temporalSRQuality = hasArg(L"--tsrq");
+	const bool temporalPipeline = hasArg(L"--tpipeline");
+	std::wstring srDllPath;   // empty: CDlssSR looks next to the harness, then up to the repository root
+	for (int i = 1; i + 1 < argc; i++) {
+		if (!wcscmp(argv[i], L"--srdll")) {
+			srDllPath = argv[i + 1];
+		}
+	}
 	std::wstring temporalImage = L"C:\\Windows\\Web\\Wallpaper\\ThemeB\\img24.jpg";
 	for (int i = 1; i + 1 < argc; i++) {
 		if (!wcscmp(argv[i], L"--timage")) {
@@ -1074,8 +1096,19 @@ int wmain(int argc, wchar_t** argv)
 		}
 	}
 	if (temporal || temporalOracle || temporalDetect || temporalBench || temporalPort || temporalEffect || temporalFlow
-			|| temporalStab || temporalStabPort || temporalStabBench) {
-		const int rc = temporalStabBench ? temporal::RunStabBench(dev, ctx)
+			|| temporalStab || temporalStabPort || temporalStabBench || temporalUpscale || temporalUpscaleCost || temporalSR || temporalSRQuality || temporalPipeline) {
+		int srRefs = 0;   // --srrefs N: only the first N references
+		for (int i = 1; i + 1 < argc; i++) {
+			if (!wcscmp(argv[i], L"--srrefs")) {
+				srRefs = _wtoi(argv[i + 1]);
+			}
+		}
+		const int rc = temporalPipeline ? temporal::RunPipeline(dev, ctx, dlss, srDllPath.c_str(), temporalFrames)
+			: temporalSRQuality ? temporal::RunSRQuality(dev, ctx, srDllPath.c_str(), srRefs)
+			: temporalSR ? temporal::RunSR(dev, ctx, dlss, srDllPath.c_str())
+			: temporalUpscaleCost ? temporal::RunUpscaleCost(dev, ctx)
+			: temporalUpscale ? temporal::RunUpscale(dev, ctx)
+			: temporalStabBench ? temporal::RunStabBench(dev, ctx)
 			: (temporalStab || temporalStabPort)
 			? temporal::RunStab(dev, ctx, dlss, temporalImage.c_str(), temporalFrames, temporalStrong, temporalStabPort)
 			: temporalFlow ? temporal::RunFlow(dev, ctx, temporalImage.c_str())
