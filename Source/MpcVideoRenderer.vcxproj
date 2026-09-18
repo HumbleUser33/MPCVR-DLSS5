@@ -78,6 +78,7 @@
     <ClCompile Include="DLSS\DlssStabilizer.cpp" />
     <ClCompile Include="DLSS\DlssSR.cpp" />
     <ClCompile Include="DLSS\DlssTiming.cpp" />
+    <ClCompile Include="Upscale\MpvShader.cpp" />
     <ClCompile Include="DX11VideoProcessor.cpp" />
     <ClCompile Include="DX9Helper.cpp" />
     <ClCompile Include="DX9VideoProcessor.cpp" />
@@ -123,6 +124,8 @@
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h" />
     <ClInclude Include="DLSS\DlssSR.h" />
     <ClInclude Include="DLSS\DlssTiming.h" />
+    <ClInclude Include="Upscale\MpvShader.h" />
+    <ClInclude Include="Upscale\MpvShaderTables.h" />
     <ClInclude Include="DLSS\NGXTypes.h" />
     <ClInclude Include="DX11VideoProcessor.h" />
     <ClInclude Include="DX9Helper.h" />

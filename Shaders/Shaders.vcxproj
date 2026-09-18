@@ -70,6 +70,10 @@
       <ShaderModel>4.0</ShaderModel>
       <ShaderType>Pixel</ShaderType>
     </FxCompile>
+    <FxCompile Include="d3d11\ps_mpv_prescale.hlsl">
+      <ShaderModel>4.0</ShaderModel>
+      <ShaderType>Pixel</ShaderType>
+    </FxCompile>
     <FxCompile Include="d3d11\ps_convert_pq_to_sdr.hlsl">
       <ShaderModel>4.0</ShaderModel>
       <ShaderType>Pixel</ShaderType>
@@ -135,6 +139,10 @@
       <ShaderType>Vertex</ShaderType>
     </FxCompile>
     <FxCompile Include="d3d11\vs_simple.hlsl">
+      <ShaderModel>4.0</ShaderModel>
+      <ShaderType>Vertex</ShaderType>
+    </FxCompile>
+    <FxCompile Include="d3d11\vs_mpv_hook.hlsl">
       <ShaderModel>4.0</ShaderModel>
       <ShaderType>Vertex</ShaderType>
     </FxCompile>

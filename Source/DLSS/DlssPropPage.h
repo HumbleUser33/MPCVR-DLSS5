@@ -50,6 +50,8 @@ private:
 	HRESULT OnConnect(IUnknown* pUnknown) override;
 	HRESULT OnDisconnect() override;
 	HRESULT OnActivate() override;
+	HRESULT OnDeactivate() override;
+	static constexpr UINT_PTR kRefreshTimer = 1; // watches "Use Direct3D 11" on the other page
 	void SetDirty()
 	{
 		m_bDirty = TRUE;

@@ -23,6 +23,7 @@ _nvngx.dll
 /tools/dlssnr_probe/*.pdb
 /tools/dlssnr_probe/*.ilk
 /tools/dlssnr_probe/*.manifest
+!/tools/dlssnr_probe/playback_test.manifest
 /tools/dlssnr_probe/probe_results.txt
 /tools/dlssnr_probe/spoof_result.txt
 
@@ -37,9 +38,15 @@ _nvngx.dll
 /tools/dlssnr_probe/*.res
 /tools/dlssnr_probe/effect_*.png
 /tools/dlssnr_probe/upscale_*.png
+/tools/dlssnr_probe/chroma_*.png
+/tools/dlssnr_probe/scalers_*.bmp
+/tools/dlssnr_probe/proppage*.bmp
 /tools/dlssnr_probe/sr_*.png
 /tools/dlssnr_probe/upscale_refs/
 /tools/dlssnr_probe/models/
 
 # ONNX Runtime and DirectML packages, fetched locally
 /external/onnxruntime/
+
+# Third-party upscaler shaders and the Khronos translation tools, fetched locally for --tupscale
+/tools/dlssnr_probe/upscalers/

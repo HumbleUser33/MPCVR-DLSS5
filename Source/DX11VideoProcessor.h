@@ -34,6 +34,7 @@
 #include "DLSS/DlssNR.h"
 #include "DLSS/DlssSR.h"
 #include "DLSS/DlssTiming.h"
+#include "Upscale/MpvShader.h"
 #include "VideoProcessor.h"
 #include "SubPic/DX11SubPic.h"
 
@@ -221,12 +222,31 @@ private:
 	CPreciseSleep m_PreciseSleep;
 	CComPtr<ID3D11Query> m_pPictureDoneQuery;
 	uint64_t m_tickSampleStart = 0;     // GetPreciseTick() when ProcessSample began on the current sample
-	// Time of each DLSS stage, for the statistics.
+	// Time of each DLSS stage and of the mpv prescalers, for the statistics.
 	CGpuStageTimes m_DlssStageTimes;
 	CRollingMs m_DlssNRTimes;
-	int m_iStatsLines = 20;             // lines the statistics box is sized for
 
-	bool RenderAheadActive() const { return m_bDlssRenderAhead && (m_bDlssNRActive || m_bDlssSRActive); }
+	// mpv prescalers (Shaders/mpv). As the Upscaling method, FSRCNNX or RAVU-zoom
+	// enlarges the luma and Catmull-Rom the picture, which takes the network's luma;
+	// the resize shaders then scale what is left. As Chroma upsampling, RAVU-zoom
+	// brings Cb and Cr to the luma size before the conversion shader reads them.
+	CMpvShader m_MpvLuma;                     // loaded while the Upscaling method names one
+	CMpvShader m_MpvChroma;                   // RAVU-zoom for chroma
+	CComPtr<ID3D11PixelShader> m_pPSMpvLuma;
+	CComPtr<ID3D11PixelShader> m_pPSMpvCombine;
+	CComPtr<ID3D11PixelShader> m_pPSMpvChromaPlane;
+	CComPtr<ID3D11Buffer> m_pMpvChromaPlaneConstants;
+	Tex2D_t m_TexMpvLuma;                     // luma of the picture at the source size
+	Tex2D_t m_TexMpvResize;                   // Catmull-Rom's first pass
+	Tex2D_t m_TexMpvColor;                    // the picture by Catmull-Rom at the prescaled size
+	Tex2D_t m_TexMpvOutput;                   // that picture with the prescaler's luma
+	CMpvShader::Texture m_TexMpvLumaOut;      // the prescaler's luma
+	Tex2D_t m_TexMpvChromaIn[2];              // Cb and Cr in red, at the chroma size
+	CMpvShader::Texture m_TexMpvChromaOut[2]; // Cb and Cr at the luma size
+	bool m_bMpvChromaActive = false;          // the conversion shader reads m_TexMpvChromaOut
+	bool m_bMpvChromaFailed = false;          // latched off until the format or the setting changes
+
+	bool RenderAheadActive() const { return m_bDlssRenderAhead && (m_bDlssNRActive || m_bDlssSRActive || m_MpvLuma.IsLoaded()); }
 	void MarkPictureSubmitted();
 	void HoldUntilPresentTime(const REFERENCE_TIME frameStartTime, const bool bMeasure);
 
@@ -373,6 +393,15 @@ public:
 	HRESULT GetCurentImage(long *pDIBImage) override;
 	HRESULT GetDisplayedImage(BYTE **ppDib, unsigned* pSize) override;
 	HRESULT GetVPInfo(std::wstring& str) override;
+	unsigned GetVideoProcessorUse() override
+	{
+		if (!m_D3D11VP.IsReady()) {
+			return 0;
+		}
+		// It only resizes while no DLSS pass has taken that back from it (UpdateTexures).
+		const bool bResizes = m_bVPScaling && !m_bVPScalingUseShaders && !m_bDlssNRActive && !m_bDlssSRActive;
+		return VPUSE_Converting | (bResizes ? VPUSE_Resizing : 0);
+	}
 
 	// Settings
 	void Configure(const Settings_t& config) override;
@@ -421,6 +450,16 @@ private:
 	bool DlssSRSupportedHere() const;
 	void UpdateDlssSR();
 	std::wstring GetDlssSRStatus() override;
+
+	// Loads the prescaler the Upscaling method names, or drops it.
+	void UpdateMpvLuma();
+	// Scales rSrc of the input towards dstRect, before rotation, through the luma
+	// prescaler: the result is enlarged as far as the network takes it, for
+	// ResizeShaderPass to finish. S_FALSE where it does not apply.
+	HRESULT MpvLumaPass(Tex2D_t* pInputTexture, const CRect& rSrc, const CRect& dstRect, const int rotation, Tex2D_t** ppResult);
+	// RAVU-zoom for Chroma upsampling where it can run, which the conversion shader follows.
+	void UpdateMpvChroma();
+	HRESULT MpvChromaPass();
 
 	HRESULT AlphaBlt(ID3D11ShaderResourceView* pShaderResource, ID3D11Texture2D* pRenderTarget,
 					 ID3D11Buffer* pVertexBuffer, D3D11_VIEWPORT* pViewPort,

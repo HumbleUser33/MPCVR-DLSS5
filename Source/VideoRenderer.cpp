@@ -238,10 +238,10 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 		}
 #endif
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_ChromaUpsampling, dw)) {
-			m_Sets.iChromaScaling = discard<int>(dw, CHROMA_Bilinear, 0, CHROMA_COUNT-1);
+			m_Sets.iChromaScaling = discard<int>(dw, CHROMA_CatmullRom, 0, CHROMA_COUNT-1);
 		}
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_Upscaling, dw)) {
-			m_Sets.iUpscaling = discard<int>(dw, UPSCALE_CatmullRom, 0, UPSCALE_COUNT-1);
+			m_Sets.iUpscaling = discard<int>(dw, UPSCALE_Jinc2, 0, UPSCALE_COUNT-1);
 		}
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_Downscaling, dw)) {
 			m_Sets.iDownscaling = discard<int>(dw, DOWNSCALE_Hamming, 0, DOWNSCALE_COUNT-1);
@@ -363,10 +363,12 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 			}
 			m_Sets.szDlssSRDllPath[std::size(m_Sets.szDlssSRDllPath) - 1] = L'\0';
 		}
+#endif
+		// Render ahead is set on the main page and covers the mpv prescalers as well,
+		// so it is not x64 only like the rest of DLSS.
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssRenderAhead, dw)) {
 			m_Sets.bDlssRenderAhead = !!dw;
 		}
-#endif
 	}
 
 	if (!IsWindows10OrGreater()) {
@@ -1432,6 +1434,11 @@ STDMETHODIMP_(bool) CMpcVideoRenderer::GetActive()
 	return m_pInputPin && m_pInputPin->GetConnected();
 }
 
+STDMETHODIMP_(unsigned) CMpcVideoRenderer::GetVideoProcessorUse()
+{
+	return m_VideoProcessor ? m_VideoProcessor->GetVideoProcessorUse() : 0;
+}
+
 STDMETHODIMP_(void) CMpcVideoRenderer::GetSettings(Settings_t& setings)
 {
 	setings = m_Sets;
@@ -1521,8 +1528,8 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 		key.SetDWORDValue(OPT_DlssSR,              m_Sets.bDlssSR);
 		key.SetDWORDValue(OPT_DlssSRPreset,        m_Sets.iDlssSRPreset);
 		key.SetStringValue(OPT_DlssSRDllPath,      m_Sets.szDlssSRDllPath);
-		key.SetDWORDValue(OPT_DlssRenderAhead,     m_Sets.bDlssRenderAhead);
 #endif
+		key.SetDWORDValue(OPT_DlssRenderAhead,     m_Sets.bDlssRenderAhead);
 	}
 
 	return S_OK;

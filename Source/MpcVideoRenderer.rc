@@ -75,11 +75,11 @@ BEGIN
     COMBOBOX        IDC_COMBO8,102,111,62,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     CONTROL         "RTX Video HDR",IDC_CHECK19,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,123,66,10
     GROUPBOX        "Shader video processor",IDC_STATIC,5,139,162,107
-    LTEXT           "Chroma upsampling:",IDC_STATIC,10,153,72,8
+    LTEXT           "Chroma upsampling:",IDC_STATIC40,10,153,72,8
     COMBOBOX        IDC_COMBO5,83,151,76,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Upscaling:",IDC_STATIC39,10,169,35,8
     COMBOBOX        IDC_COMBO2,83,167,76,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Downscaling:",IDC_STATIC,10,185,44,8
+    LTEXT           "Downscaling:",IDC_STATIC41,10,185,44,8
     COMBOBOX        IDC_COMBO3,83,183,76,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     CONTROL         "Use the ""Upscaling"" method to reducing the frame to 50%",IDC_CHECK6,
                     "Button",BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP,10,199,146,15
@@ -108,6 +108,7 @@ BEGIN
     CONTROL         "Adjust the frame presentation time",IDC_CHECK13,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,191,133,10
     CONTROL         "Reinitialize device when changing display",IDC_CHECK16,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,204,151,10
+    CONTROL         "Render ahead to keep audio sync",IDC_CHECK26,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,219,124,10
     PUSHBUTTON      "Default",IDC_BUTTON1,305,217,37,14
     EDITTEXT        IDC_EDIT2,76,248,266,12,ES_READONLY | NOT WS_BORDER,WS_EX_RIGHT
 END
@@ -168,7 +169,6 @@ BEGIN
     EDITTEXT        IDC_EDIT9,30,253,290,12,ES_AUTOHSCROLL
     PUSHBUTTON      "...",IDC_BUTTON4,324,253,18,12
     LTEXT           "",IDC_STATIC38,10,271,332,8,SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS
-    CONTROL         "Render ahead to keep DLSS pictures in sync with audio",IDC_CHECK26,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,294,220,10
     PUSHBUTTON      "Default",IDC_BUTTON3,305,292,37,14
 END
 
@@ -230,7 +230,7 @@ STRINGTABLE
 BEGIN
     IDS_MAINPROPPAGE_TITLE  "Settings"
     IDS_INFOPROPPAGE_TITLE  "Information"
-    IDS_DLSSPROPPAGE_TITLE  "DLSS 5"
+    IDS_DLSSPROPPAGE_TITLE  "DLSS"
 END
 
 #endif    // English (United States) resources

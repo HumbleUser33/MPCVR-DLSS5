@@ -123,7 +123,7 @@ private:
 class CGpuStageTimes
 {
 public:
-	enum Stage { NRMotion, NRStabilize, SRMotion, SR, StageCount };
+	enum Stage { NRMotion, NRStabilize, SRMotion, SR, MpvLuma, MpvChroma, StageCount };
 
 	void Release();
 

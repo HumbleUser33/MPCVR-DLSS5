@@ -64,7 +64,10 @@ void CVideoProcessor::UpdateStatsByWindow()
 	if (m_iResizeStats == 1) {
 		int w = std::max(512, m_windowRect.Width() / 2 - 10) - 5 - 3;
 		int h = std::max(280, m_windowRect.Height() - 10) - 5 - 3;
-		m_StatsFontH = (int)std::ceil(std::min(w / 36.0, h / 19.4));
+		// 0.59 and 1.02 are the width and the height of a Consolas cell against its
+		// point size: the old constants 36 and 19.4 were these for 61 columns and 19
+		// lines, before the box started following the text.
+		m_StatsFontH = (int)std::ceil(std::min(w / (m_StatsColumns * 0.59), h / (m_StatsLines * 1.02)));
 		m_StatsFontH &= ~1;
 		if (m_StatsFontH < 14) {
 			m_StatsFontH = 14;
@@ -107,6 +110,42 @@ void CVideoProcessor::UpdateStatsByDisplay()
 
 		CalcStatsParams();
 	}
+}
+
+bool CVideoProcessor::UpdateStatsLayout(const std::wstring& text)
+{
+	int lines = 1;
+	int columns = 0;
+	int column = 0;
+	for (const wchar_t c : text) {
+		if (c == L'\n') {
+			lines++;
+			columns = std::max(columns, column);
+			column = 0;
+		} else {
+			column++;
+		}
+	}
+	columns = std::clamp(std::max(columns, column), kStatsMinColumns, kStatsMaxColumns);
+
+	if (lines > m_StatsLines || columns > m_StatsColumns) {
+		m_StatsLines = std::max(lines, m_StatsLines);
+		m_StatsColumns = std::max(columns, m_StatsColumns);
+		m_StatsShrinkCount = 0;
+		return true;
+	}
+	if (lines < m_StatsLines || columns < m_StatsColumns) {
+		// About a second at any frame rate anyone plays films at.
+		if (++m_StatsShrinkCount < 30) {
+			return false;
+		}
+		m_StatsLines = lines;
+		m_StatsColumns = columns;
+		m_StatsShrinkCount = 0;
+		return true;
+	}
+	m_StatsShrinkCount = 0;
+	return false;
 }
 
 bool CVideoProcessor::CheckGraphPlacement()

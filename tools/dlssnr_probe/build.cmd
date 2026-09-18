@@ -53,7 +53,7 @@ IF EXIST "%ORT%\build\native\include\onnxruntime_cxx_api.h" (
 cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 ^
    /DUNICODE /D_UNICODE /I"%SRC%" %ORTFLAGS% harness.cpp %ORTLIB% ^
    "%SRC%\DLSS\DlssNR.cpp" "%SRC%\DLSS\DlssMotionMask.cpp" "%SRC%\DLSS\DlssOpticalFlow.cpp" "%SRC%\DLSS\DlssStabilizer.cpp" ^
-   "%SRC%\DLSS\DlssSR.cpp" ^
+   "%SRC%\DLSS\DlssSR.cpp" "%SRC%\Upscale\MpvShader.cpp" ^
    "%SRC%\DX11Helper.cpp" "%SRC%\Utils\Util.cpp" ^
    "%MH%\hook.c" "%MH%\buffer.c" "%MH%\trampoline.c" "%MH%\hde\hde64.c" ^
    detector_shaders.res /Fe:dlssnr_harness.exe || EXIT /B 1
@@ -67,7 +67,8 @@ cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x
 ECHO Building the playback test (render ahead in a DirectShow graph, needs the x64 filter built)...
 cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /DNDEBUG ^
    /DUNICODE /D_UNICODE /I"%SRC%" /I"..\..\external\BaseClasses" playback_test.cpp ^
-   /Fe:playback_test.exe /link "..\..\_bin\lib\Release_x64\BaseClasses.lib" || EXIT /B 1
+   /Fe:playback_test.exe /link "..\..\_bin\lib\Release_x64\BaseClasses.lib" ^
+   /MANIFEST:EMBED /MANIFESTINPUT:playback_test.manifest || EXIT /B 1
 
 DEL /Q *.obj *.exp *.cso *.res 2>NUL
 

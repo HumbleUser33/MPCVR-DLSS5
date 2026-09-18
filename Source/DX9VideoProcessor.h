@@ -169,6 +169,13 @@ public:
 	HRESULT GetCurentImage(long *pDIBImage) override;
 	HRESULT GetDisplayedImage(BYTE **ppDib, unsigned *pSize) override;
 	HRESULT GetVPInfo(std::wstring& str) override;
+	unsigned GetVideoProcessorUse() override
+	{
+		if (!m_DXVA2VP.IsReady()) {
+			return 0;
+		}
+		return VPUSE_Converting | ((m_bVPScaling && !m_bVPScalingUseShaders) ? VPUSE_Resizing : 0);
+	}
 
 	// Settings
 	void Configure(const Settings_t& config) override;

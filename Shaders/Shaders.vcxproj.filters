@@ -84,6 +84,12 @@
     <FxCompile Include="d3d11\ps_dlss_stabilize.hlsl">
       <Filter>d3d11</Filter>
     </FxCompile>
+    <FxCompile Include="d3d11\ps_mpv_prescale.hlsl">
+      <Filter>d3d11</Filter>
+    </FxCompile>
+    <FxCompile Include="d3d11\vs_mpv_hook.hlsl">
+      <Filter>d3d11</Filter>
+    </FxCompile>
     <FxCompile Include="d3d11\ps_convert_biplanar.hlsl">
       <Filter>d3d11</Filter>
     </FxCompile>

@@ -201,7 +201,7 @@ repeated pictures (variable frame rates, 25p stored as 50p) handled like the per
 
 ## DLSS Super Resolution (experimental)
 
-**Use DLSS SR 4.5 for upscaling**, on the DLSS 5 page, enlarges the picture with DLSS Super
+**Use DLSS SR 4.5 for upscaling**, on the DLSS page, enlarges the picture with DLSS Super
 Resolution instead of the **Upscaling** method of the main page, which is then greyed. It is
 independent of DLSS 5 NR: another DLL, another session, and it works with NR on or off. When
 NR runs before upscaling, SR takes its output.
@@ -262,6 +262,80 @@ cleaner look is worth it on your films.
 
 ---
 
+## Upscaling: FSRCNNX and RAVU-zoom
+
+Three entries at the end of the main page's **Upscaling** list enlarge the luma with a small
+network instead of a filter kernel, the way mpv's prescalers do:
+
+| Entry | What it is | Luma time, 1080p→4K, RTX 3050 |
+|---|---|---|
+| **FSRCNNX 8** | FSRCNNX_x2_8-0-4-1, a 4-layer convolutional network, doubles | 4.6 ms |
+| **FSRCNNX 16** | FSRCNNX_x2_16-0-4-1, the same with 16 feature maps, doubles | 16.6 ms |
+| **RAVU-zoom** | RAVU-Zoom-AR r3, trained edge-directed weights, to any size at once | 2.8 ms |
+
+The colour comes from Catmull-Rom, which enlarges the picture as usual; the network's luma
+then replaces its own, by adding the difference to R, G and B alike, so chroma is untouched.
+Where the picture grows by more than the doubling (720p on a 4K screen) the resize shaders
+finish the job, and where it grows by less they reduce what the network doubled, as mpv does.
+Below 1.3× FSRCNNX does not run at all, and RAVU-zoom needs the picture to grow on both axes;
+the statistics then name Catmull-Rom, which is what runs. They need Direct3D 11 at feature
+level 11.0 (the passes are shader model 5); on Direct3D 9, on older hardware, and while DLSS
+Super Resolution is enlarging the picture, Catmull-Rom stands in.
+
+**Chroma upsampling** has a fourth entry, **RAVU-zoom**, which brings Cb and Cr to the luma
+size with the same shader, each plane on its own and placed where the video's chroma siting
+puts it (MPEG-2, co-sited or centred). It runs on 4:2:0 through the shader video processor;
+elsewhere — 4:2:2, the hardware video processor, Direct3D 9 — Catmull-Rom does it.
+
+What they are worth, on seven 4K film frames reduced and enlarged again (`--tupscale`,
+`--tchroma`), as PSNR on the most detailed quarter of the picture, against Catmull-Rom:
+
+| Method | 1080p→4K | 720p→4K | 1080p→4K, compressed |
+|---|---|---|---|
+| FSRCNNX 16 | **+1.80 dB** | **+2.65 dB** | −0.33 dB |
+| FSRCNNX 8 | +1.33 dB | +2.36 dB | −0.42 dB |
+| RAVU-zoom | +1.26 dB | +1.68 dB | −0.02 dB |
+| Jinc2m | −4.87 dB | −1.65 dB | −2.21 dB |
+
+They restore edges close to the original's sharpness (0.96 to 0.97 where the original is 1.00
+and Catmull-Rom 0.90) without the halos and the aliasing Jinc2m adds at 1.13. On compressed
+sources every method lands within half a decibel of Catmull-Rom, and on grain RAVU-zoom
+matches it while FSRCNNX keeps a little more of it. For chroma none of them beats Catmull-Rom
+on film: RAVU-zoom is about a decibel under it overall and a little better only on colour
+edges, which is why Catmull-Rom is what the filter defaults to. The **defaults changed**:
+Upscaling is Jinc2m and Chroma upsampling Catmull-Rom for a fresh installation; settings
+already saved in the registry are left alone.
+
+The statistics show what they cost, next to the DLSS lines:
+
+    Prescale (ms) : FSRCNNX 16 8.4, RAVU-zoom chroma 1.9
+
+Only what runs is listed. When the hardware video processor handles the source format it
+converts the picture itself, chroma included, so the **Chroma upsampling** list has nothing to
+do and no chroma line appears; the processor line says so:
+
+    VideoProcessor: D3D11 VP, output to R10G10B10A2_UNORM, converts chroma
+
+The main page greys a list that is out of service for that reason, on what the filter is
+actually doing: **Chroma upsampling** while the video processor converts, **Upscaling** and
+**Downscaling** while it also resizes (*Use for resizing*, which DLSS 5 NR and DLSS SR suspend
+on their own), and **Upscaling** while DLSS SR enlarges. A list that a Dolby Vision or YCgCo
+picture sends back to the shaders stays available.
+
+Render ahead (below) covers them as well: with FSRCNNX 16 a 4K picture takes more than the 8 ms
+the renderer allows itself, and without it the picture would reach the screen late.
+
+The shaders come from mpv's user-shader collections and are translated to HLSL once, offline:
+`Shaders/mpv/mpv_shaders.py` runs each pass through glslang and SPIRV-Cross — the route
+libplacebo itself takes on Direct3D 11 — and writes `Shaders/mpv/<shader>/passNN.hlsl`, the
+lookup tables as half floats, the table `Source/Upscale/MpvShaderTables.h` and the generated
+blocks of `compile_shaders.cmd` and `MpcVideoRenderer.rc2`. `Source/Upscale/MpvShader.cpp` runs
+them the way libplacebo does: each pass renders into a texture of the size its WIDTH and HEIGHT
+give, reading the plane, what earlier passes saved and the tables. `--tmpvport` checks that
+this gives the harness's pictures exactly, and that the chroma siting is applied.
+
+---
+
 ## Render ahead
 
 The renderer wakes up 8 ms before a picture's time and only then processes it, so whatever
@@ -271,15 +345,15 @@ DLSS 5 NR and DLSS SR — and DLSS SR's GPU time comes on top, since the GPU run
 Present has returned. The delay also varied by several ms from picture to picture, enough to
 move some pictures to the next refresh of a 60 Hz screen.
 
-**Render ahead** (DLSS page, on by default) measures each picture from the start of its
-processing to the GPU being done with it, and starts the next pictures earlier by the slowest
-of the last 32 plus 3 ms. Each picture then waits, while the GPU finishes it, for the moment
-the renderer presents at without DLSS: half a refresh before its time, on the reference clock.
-Presentation stays on the audio clock. It never waits for the GPU itself: a picture not
-finished at its present time is presented anyway, reaches the screen once the GPU is done, as
-it would have without render ahead, and moves the start earlier. It does nothing while
-neither DLSS pass runs, and a picture cannot start before the previous one has been presented:
-about a frame earlier at most, never more than 60 ms.
+**Render ahead to keep audio sync** (Settings page, on by default) measures each picture from
+the start of its processing to the GPU being done with it, and starts the next pictures earlier
+by the slowest of the last 32 plus 3 ms. Each picture then waits, while the GPU finishes it,
+for the moment the renderer presents at without DLSS: half a refresh before its time, on the
+reference clock. Presentation stays on the audio clock. It never waits for the GPU itself: a
+picture not finished at its present time is presented anyway, reaches the screen once the GPU is
+done, as it would have without render ahead, and moves the start earlier. It does nothing while
+neither DLSS nor a luma prescaler runs, and a picture cannot start before the previous one has
+been presented: about a frame earlier at most, never more than 60 ms.
 
 Measured in a DirectShow graph with the filter itself (`playback_test.exe`): an 800×450 film in
 a 1280×720 window on an RTX 3050 and a 60 Hz screen, with DLSS 5 NR and DLSS SR (NR 23 ms,
@@ -315,8 +389,10 @@ waits for it, the other stages with GPU timestamps while the statistics are show
 
 ## Settings
 
-Everything lives on the **DLSS 5** page of the renderer's properties (x64 builds only) and is
-stored under `HKCU\Software\MPC-BE Filters\MPC Video Renderer`.
+Everything lives on the **DLSS** page of the renderer's properties (x64 builds only) and is
+stored under `HKCU\Software\MPC-BE Filters\MPC Video Renderer`. Render ahead is the exception:
+it serves the luma prescalers as much as DLSS, so it sits on the **Settings** page, where the
+32-bit builds reach it too. Its registry key, `DlssRenderAhead`, did not change.
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -335,15 +411,21 @@ stored under `HKCU\Software\MPC-BE Filters\MPC Video Renderer`.
 | Motion | NVIDIA Optical Flow | Or *Shader detector (still areas)*. Applies on the next picture |
 | Send the motion vectors to DLSS | off | Optical Flow only. Steadier, but the network renders differently around moving objects |
 | Disable temporal history | off | Forces `DLSSNR.Reset` every frame. The stabilizer is not affected |
-| Use DLSS SR 4.5 for upscaling | off | Experimental, see above. Greys the main page's Upscaling list |
+| Use DLSS SR 4.5 for upscaling | off | Experimental, see above. Greys the main page's Upscaling list while it is on |
 | Preset (DLSS SR) | Automatic | Or J, K, L, M. Applies on the next picture |
 | DLL (DLSS SR) | empty | `nvngx_dlss.dll` or its folder. Empty means search next to the filter and up |
-| Render ahead to keep DLSS pictures in sync with audio | on | See above. Used only while DLSS 5 NR or DLSS SR runs |
 
-**Default** on the page resets the tuning, from Style to Disable temporal history, motion
-settings, the DLSS SR preset and render ahead included; it leaves Enable, Use DLSS SR, the key
-and both DLL paths alone. Applying the page sends only what was changed on it, so it never
-undoes the toggle key or the main page, and the main page leaves these settings alone.
+On the **Settings** page, bottom right:
+
+| Setting | Default | Notes |
+|---|---|---|
+| Render ahead to keep audio sync | on | See above. Used while DLSS 5 NR, DLSS SR or a luma prescaler runs. Needs Direct3D 11 |
+
+**Default** on the DLSS page resets the tuning, from Style to Disable temporal history, motion
+settings and the DLSS SR preset; it leaves Enable, Use DLSS SR, the key, both DLL paths and
+render ahead, which belongs to the Settings page, alone. Applying the page sends only what was
+changed on it, so it never undoes the toggle key or the main page, and the main page leaves
+these settings alone.
 
 The feature is also reachable programmatically through `IExFilterConfig`:
 `Flt_SetBool("dlssNR", true/false)` and `Flt_GetBool("dlssNR", &b)`. `Flt_GetString("statsText")`
@@ -422,16 +504,20 @@ dlssnr_harness.exe --tstabbench   what the stabilizer costs at 1080p and 2160p
 dlssnr_harness.exe --tpipeline    the whole DLSS chain as the renderer runs it: CPU and GPU time per stage
 dlssnr_harness.exe --tsr          DLSS Super Resolution: bring-up, presets, scales, costs, NR next to it
 dlssnr_harness.exe --tsrq         DLSS SR against the resize shaders on moving film frames
-dlssnr_harness.exe --tupscale     the resize shaders (and EfRLFN, with ONNX Runtime) on film frames
+dlssnr_harness.exe --tupscale     the resize shaders and the mpv prescalers on film frames
 dlssnr_harness.exe --tupscalecost what EfRLFN costs at film sizes
+dlssnr_harness.exe --tchroma      the chroma upsamplers on 4:2:0 made from film frames
+dlssnr_harness.exe --tmpvport     the filter's prescaler runner against the harness's
 ```
 
 `--tframes N` sets the frames per run; `--tstrong` uses the strongest network settings;
 `--timage <file>` picks the photo for `--teffect`, `--tflow` and `--tstab` (a Windows 11
 wallpaper by default). `--nonr` skips the DLSS 5 NR session for the suites that do not need
 it, `--srdll <path>` points at `nvngx_dlss.dll`, and `--srrefs N` limits `--tsrq` to the
-first N references. `--tupscale` and `--tsrq` read 4K film frames from
-`tools/dlssnr_probe/upscale_refs/`.
+first N references. `--tupscale`, `--tchroma`, `--tmpvport` and `--tsrq` read 4K film frames
+from `tools/dlssnr_probe/upscale_refs/`. `--tupscale` also runs the mpv shaders it finds
+translated under `tools/dlssnr_probe/upscalers/hlsl/` (`Shaders/mpv/mpv_shaders.py` puts them
+there); the three the filter embeds need nothing but the build.
 
 A neural upscaler, EfRLFN, was measured too and not integrated: 922 ms per 1080p frame on the
 RTX 3050 with DirectML (`--tupscalecost`), and no better than Catmull-Rom or Lanczos on clean
@@ -447,9 +533,25 @@ statistics ten times a second and reports the Sync offset, skipped and late pict
 long pause, run and stop take; it fails when a state change takes more than a second. The
 settings go to the filter for the run only, nothing is saved.
 
+With `--scalers` it plays a still NV12 picture through the shader video processor with each
+Upscaling and Chroma upsampling method in turn, reports what the statistics say they did and
+cost, saves each displayed picture as `scalers_<n>.bmp` and compares them with the Catmull-Rom
+one — a wrong pass shows up as a large difference. It also saves the same picture with the
+statistics drawn over it, as `scalers_<n>_stats.bmp`, which is how the overlay's box is checked.
+`--vp` leaves the hardware video processor the formats it is set for, to see it convert.
+
+`--mainpage` and `--dlsspage` show a property page of the built filter for a few seconds and
+save it as `proppage.bmp`, without a player; `--click <id>` then clicks one control and saves
+the page again as `proppage_clicked.bmp`, which is how the greying is checked. The program
+carries a Windows 10 manifest, without which the version helpers answer 6.2 and the pages grey
+what the player would not; it turns HDR passthrough off for its runs in exchange, since the
+filter may then switch the display's own HDR state, which is not what is being measured.
+
 ```
 playback_test.exe [--seconds 20] [--size 800x450] [--window 1280x720] [--fps 23.976] [--only N]
-playback_test.exe --dlsspage 10   shows the filter's DLSS 5 page for 10 s instead
+playback_test.exe --scalers       each Upscaling and Chroma upsampling method (--vp: hardware)
+playback_test.exe --dlsspage 10   shows the filter's DLSS page for 10 s instead
+playback_test.exe --mainpage 10   the same for the Settings page, --click <id> clicks one control
 ```
 
 ---
@@ -463,6 +565,13 @@ The NGX ABI declarations in `Source/DLSS/NGXTypes.h` are hand-written from the p
 documented shape of the interface. NVIDIA DLSS, NGX and the `nvngx_*` / `_nvngx.dll`
 binaries are NVIDIA property under their own licences and are not distributed here;
 `nvngx_dlss.dll` comes from NVIDIA's own DLSS repository under its licence.
+
+The prescalers under `Shaders/mpv/` are translated from mpv user shaders and keep their
+authors' notices: **FSRCNNX** is Copyright (C) 2017-2021 **igv**
+(`github.com/igv/FSRCNN-TensorFlow`) and **RAVU** is by **Bin Jin**
+(`github.com/bjin/mpv-prescalers`), both under the **GNU Lesser General Public License 3.0 or
+later**, whose text is in `Shaders/mpv/LICENSE.LGPL-3.0.txt`. Only the shaders are taken; the
+translation to HLSL and everything that runs them is part of this fork and GPLv3 like the rest.
 
 `Source/DLSS/NvOF/` holds the two interface headers of the NVIDIA Optical Flow SDK 5.0.7,
 copied unchanged. Each carries its own permission notice ("This copyright notice applies to

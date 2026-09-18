@@ -143,6 +143,32 @@ static bool SaveBoard(IWICImagingFactory* factory, const wchar_t* path,
 	return SavePng(factory, path, board, 2 * pw, all, 1.0f);
 }
 
+// Six methods side by side, close up: the most detailed 320x180 window of the
+// reference, each panel blown up twice by pixel repetition so that edges, halos
+// and invented texture show as they are. Three columns, two rows.
+static bool SaveZoomBoard(IWICImagingFactory* factory, const wchar_t* path,
+                          const std::vector<const std::vector<float>*>& pictures, int W, int H, POINT at)
+{
+	const int cw = 320, ch = 180, zoom = 2;
+	const int pw = cw * zoom, ph = ch * zoom;
+	const int x0 = std::clamp((int)at.x, 0, W - cw), y0 = std::clamp((int)at.y, 0, H - ch);
+	std::vector<float> board(4 * (size_t)(3 * pw) * (2 * ph), 0.0f);
+	for (size_t n = 0; n < pictures.size() && n < 6; n++) {
+		if (!pictures[n]) {
+			continue;
+		}
+		const int bx = (int)(n % 3) * pw, by = (int)(n / 3) * ph;
+		for (int y = 0; y < ph; y++) {
+			for (int x = 0; x < pw; x++) {
+				const float* src = &(*pictures[n])[4 * ((size_t)(y0 + y / zoom) * W + (x0 + x / zoom))];
+				std::copy_n(src, 4, &board[4 * ((size_t)(by + y) * (3 * pw) + bx + x)]);
+			}
+		}
+	}
+	const Rect all = { 0, 0, 3 * pw, 2 * ph };
+	return SavePng(factory, path, board, 3 * pw, all, 1.0f);
+}
+
 // Integer box reduction: what a careful encoder does, and no invented detail.
 static void DownscaleBox(const std::vector<float>& src, int W, int H, int factor, std::vector<float>& dst)
 {
@@ -490,6 +516,7 @@ public:
 		const char* name;
 		int  index;        // into m_ps
 		bool onePass;
+		bool easu = false; // AMD FSR 1 EASU: its own constants
 	};
 
 	bool Init(ID3D11Device* dev, std::string& error);
@@ -510,14 +537,17 @@ public:
 private:
 	bool Compile(ID3D11Device* dev, const wchar_t* file, const D3D_SHADER_MACRO* defines, CComPtr<ID3D11PixelShader>& ps, std::string& error);
 	bool LoadCso(ID3D11Device* dev, const wchar_t* file, CComPtr<ID3D11PixelShader>& ps);
+	// ownConstants: the pass's block is already filled (EASU's), leave it alone.
 	void Draw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, ID3D11ShaderResourceView* src,
-	          ID3D11RenderTargetView* dst, UINT srcW, UINT srcH, UINT dstW, UINT dstH, float scaleX, float scaleY);
+	          ID3D11RenderTargetView* dst, UINT srcW, UINT srcH, UINT dstW, UINT dstH, float scaleX, float scaleY,
+	          ID3D11Buffer* ownConstants = nullptr);
 
 	CComPtr<ID3D11VertexShader> m_vs;
 	CComPtr<ID3D11InputLayout>  m_layout;
 	CComPtr<ID3D11SamplerState> m_point;
 	CComPtr<ID3D11Buffer>       m_vb;
 	CComPtr<ID3D11Buffer>       m_cb;
+	CComPtr<ID3D11Buffer>       m_cbEasu;
 	std::vector<CComPtr<ID3D11PixelShader>> m_ps;   // pairs: X then Y, or one for single-pass
 	std::vector<Method> m_methods;
 	Method m_downscaler = { "Hamming", -1, false };
@@ -604,6 +634,22 @@ bool CUpscalePasses::Init(ID3D11Device* dev, std::string& error)
 		m_ps.push_back(jinc);
 	}
 
+	// AMD FSR 1 EASU, when its headers were fetched into upscalers\.
+	if (GetFileAttributesW(L"upscalers\\ffx_fsr1.h") != INVALID_FILE_ATTRIBUTES) {
+		CComPtr<ID3DBlob> easuCode, easuErrors;
+		CComPtr<ID3D11PixelShader> easu;
+		const HRESULT easuHr = D3DCompileFromFile(L"upscalers\\ps_fsr_easu.hlsl", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+			"main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &easuCode, &easuErrors);
+		if (SUCCEEDED(easuHr) && SUCCEEDED(dev->CreatePixelShader(easuCode->GetBufferPointer(), easuCode->GetBufferSize(), nullptr, &easu))) {
+			Method m = { "AMD FSR 1 EASU", (int)m_ps.size(), true };
+			m.easu = true;
+			m_methods.push_back(m);
+			m_ps.push_back(easu);
+		} else {
+			printf("  FSR 1 EASU: %s\n", easuErrors ? std::string((const char*)easuErrors->GetBufferPointer(), easuErrors->GetBufferSize()).c_str() : "compile failed");
+		}
+	}
+
 	{
 		CComPtr<ID3D11PixelShader> x, y;
 		for (int axis = 0; axis < 2; axis++) {
@@ -634,6 +680,8 @@ bool CUpscalePasses::Init(ID3D11Device* dev, std::string& error)
 	dev->CreateBuffer(&bd, &init, &m_vb);
 	D3D11_BUFFER_DESC cbd = { 32, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
 	dev->CreateBuffer(&cbd, nullptr, &m_cb);
+	cbd.ByteWidth = 64;
+	dev->CreateBuffer(&cbd, nullptr, &m_cbEasu);
 	if (!m_point || !m_vb || !m_cb) {
 		error = "pipeline state objects";
 		return false;
@@ -643,24 +691,26 @@ bool CUpscalePasses::Init(ID3D11Device* dev, std::string& error)
 
 void CUpscalePasses::Draw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, ID3D11ShaderResourceView* src,
                           ID3D11RenderTargetView* dst, UINT srcW, UINT srcH, UINT dstW, UINT dstH,
-                          float scaleX, float scaleY)
+                          float scaleX, float scaleY, ID3D11Buffer* ownConstants)
 {
 	// PS_CONSTANTS of the resize shaders: the source size, its texel size, and
 	// the ratio of source to destination -- TextureResizeShader's block.
-	const FLOAT constants[8] = {
-		(float)srcW, (float)srcH, 1.0f / srcW, 1.0f / srcH,
-		scaleX, scaleY, 0, 0
-	};
-	D3D11_MAPPED_SUBRESOURCE mr = {};
-	if (SUCCEEDED(ctx->Map(m_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr))) {
-		memcpy(mr.pData, constants, sizeof(constants));
-		ctx->Unmap(m_cb, 0);
+	if (!ownConstants) {
+		const FLOAT constants[8] = {
+			(float)srcW, (float)srcH, 1.0f / srcW, 1.0f / srcH,
+			scaleX, scaleY, 0, 0
+		};
+		D3D11_MAPPED_SUBRESOURCE mr = {};
+		if (SUCCEEDED(ctx->Map(m_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr))) {
+			memcpy(mr.pData, constants, sizeof(constants));
+			ctx->Unmap(m_cb, 0);
+		}
 	}
 
 	const D3D11_VIEWPORT vp = { 0, 0, (FLOAT)dstW, (FLOAT)dstH, 0, 1 };
 	const UINT stride = sizeof(Vertex11), offset = 0;
 	ID3D11Buffer* vb = m_vb;
-	ID3D11Buffer* cb = m_cb;
+	ID3D11Buffer* cb = ownConstants ? ownConstants : m_cb.p;
 	ID3D11SamplerState* samp = m_point;
 
 	ctx->IASetInputLayout(m_layout);
@@ -686,6 +736,24 @@ bool CUpscalePasses::Resize(ID3D11Device* dev, ID3D11DeviceContext* ctx, const M
                             ID3D11ShaderResourceView* src, UINT srcW, UINT srcH,
                             ID3D11RenderTargetView* dst, UINT dstW, UINT dstH)
 {
+	if (method.easu) {
+		// FsrEasuCon() with the whole input as the viewport.
+		const float rx = (float)srcW / dstW, ry = (float)srcH / dstH;
+		const FLOAT con[16] = {
+			rx, ry, 0.5f * rx - 0.5f, 0.5f * ry - 0.5f,
+			1.0f / srcW, 1.0f / srcH, 1.0f / srcW, -1.0f / srcH,
+			-1.0f / srcW, 2.0f / srcH, 1.0f / srcW, 2.0f / srcH,
+			0.0f, 4.0f / srcH, 0.0f, 0.0f,
+		};
+		D3D11_MAPPED_SUBRESOURCE mr = {};
+		if (FAILED(ctx->Map(m_cbEasu, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr))) {
+			return false;
+		}
+		memcpy(mr.pData, con, sizeof(con));
+		ctx->Unmap(m_cbEasu, 0);
+		Draw(ctx, m_ps[method.index], src, dst, srcW, srcH, dstW, dstH, rx, ry, m_cbEasu);
+		return true;
+	}
 	if (method.onePass) {
 		Draw(ctx, m_ps[method.index], src, dst, srcW, srcH, dstW, dstH, (float)srcW / dstW, (float)srcH / dstH);
 		return true;
@@ -831,7 +899,9 @@ struct Degradation {
 	float jpeg;       // quality 0..1, 0 for none
 };
 
-static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
+// maxRefs limits the run to the first references (--srrefs), noModels leaves out
+// EfRLFN, whose seconds per picture otherwise dominate the run (--nomodels).
+static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx, int maxRefs = 0, bool noModels = false)
 {
 	Head("Upscaling suite: what each method rebuilds from a reduced picture");
 
@@ -856,6 +926,9 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 				}
 			}
 			std::sort(files.begin(), files.end());
+			if (maxRefs > 0 && files.size() > (size_t)maxRefs) {
+				files.resize((size_t)maxRefs);
+			}
 		}
 		const bool bOwnReferences = !files.empty();
 		if (!bOwnReferences) {
@@ -870,6 +943,43 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 		if (!passesOk) {
 			printf("  %s\n", error.c_str());
 			rc = 1;
+		}
+
+		// mpv's user shaders, translated into upscalers\hlsl by mpv_shaders.py. The luma
+		// ones run on the luma of the reduced picture and are measured on luma, which is
+		// all Measure() compares for the renderer's filters too.
+		std::vector<std::unique_ptr<CMpvShader>> lumaShaders;
+		if (!rc) {
+			std::vector<std::wstring> dirs;
+			WIN32_FIND_DATAW fd = {};
+			HANDLE h = FindFirstFileW(L"upscalers\\hlsl\\*", &fd);
+			if (h != INVALID_HANDLE_VALUE) {
+				do {
+					if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.') {
+						dirs.push_back(fd.cFileName);
+					}
+				} while (FindNextFileW(h, &fd));
+				FindClose(h);
+			}
+			std::sort(dirs.begin(), dirs.end());
+			for (const std::wstring& d : dirs) {
+				auto shader = std::make_unique<CMpvShader>();
+				std::string shaderError;
+				if (!shader->Load(dev, L"upscalers\\hlsl\\" + d, shaderError)) {
+					printf("  %S: %s\n", d.c_str(), shaderError.c_str());
+					g_failures++;
+					continue;
+				}
+				if (!shader->Hooks("LUMA") || shader->Hooks("CHROMA")) {
+					continue;   // chroma shaders are --tchroma's
+				}
+				if (shader->HasPixelOffset()) {
+					printf("  %S: shifts its output by part of a pixel, which mpv's main scaler corrects; left out\n", d.c_str());
+					continue;
+				}
+				printf("  mpv shader %s, %d passes\n", shader->Name().c_str(), shader->PassCount());
+				lumaShaders.push_back(std::move(shader));
+			}
 		}
 
 		CComPtr<ID3D11Query> disjoint, tsStart, tsEnd;
@@ -903,9 +1013,8 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 			Out("block: on the compressed rows only, the steps sitting on the compression grid against the steps\n");
 			Out("elsewhere, so 1.00 means the blocks are gone. ms: GPU time of the resize itself.\n");
 
-#ifdef HAVE_ONNXRUNTIME
-			// EfRLFN at x2 and at x4. The renderer's filters cover whatever scale a
-			// model leaves: Catmull-Rom when it falls short, Hamming when it overshoots.
+			// The renderer's filters cover whatever scale a model or a doubler leaves:
+			// Catmull-Rom when it falls short, Hamming when it overshoots.
 			int catmullRom = -1, jinc = -1;
 			for (int mi = 0; mi < passes.MethodCount(); mi++) {
 				if (!strcmp(passes.GetMethod(mi).name, "Catmull-Rom")) {
@@ -915,8 +1024,18 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 					jinc = mi;
 				}
 			}
+			if (!lumaShaders.empty()) {
+				Out("mpv shaders (translated by mpv_shaders.py) run on the reduced picture's luma, as mpv runs them;\n");
+				Out("a doubler that falls short of the size is finished by the renderer's Catmull-Rom, timed with it.\n");
+			}
+
+#ifdef HAVE_ONNXRUNTIME
+			// EfRLFN at x2 and at x4.
 			auto loadModel = [&](const wchar_t* model) {
 				std::unique_ptr<COnnxUpscaler> result;
+				if (noModels) {
+					return result;
+				}
 				if (GetFileAttributesW(model) == INVALID_FILE_ATTRIBUTES) {
 					printf("  no %S, skipping it\n", model);
 					return result;
@@ -938,7 +1057,7 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 				Out("(ms*) is almost all the network's own, and far outside a frame's budget (see --tupscalecost).\n");
 			}
 #else
-			const int jinc = -1;
+			(void)noModels;
 #endif
 
 			std::vector<float> lowres, upscaled, work;
@@ -976,7 +1095,7 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 						    "method", "psnr", "psnr-d", "ssim", "sharp", "halo", "grain", "block", "time");
 
 						// Kept for the board: Jinc2m, the best of the current filters, and the models.
-						std::vector<float> keptJinc, keptX2, keptX4;
+						std::vector<float> keptJinc, keptCatmull, keptX2, keptX4;
 
 						// What the reduction alone costs, as a floor: the low-resolution
 						// picture blown up by nearest neighbour is not measured, but the
@@ -1070,6 +1189,110 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 							if (mi == jinc) {
 								keptJinc = upscaled;
 							}
+							if (mi == catmullRom) {
+								keptCatmull = upscaled;
+							}
+						}
+
+						// mpv's shaders on the luma plane. The row reads like the others: the
+						// output goes back as grey, whose luma is the plane itself.
+						std::map<std::string, std::vector<float>> keptShaders;
+						if (!lumaShaders.empty()) {
+							std::vector<HALF> yHalf(4 * (size_t)lw * lh);
+							const HALF zero = DirectX::PackedVector::XMConvertFloatToHalf(0.0f);
+							const HALF one = DirectX::PackedVector::XMConvertFloatToHalf(1.0f);
+							for (size_t i = 0; i < (size_t)lw * lh; i++) {
+								yHalf[4 * i] = DirectX::PackedVector::XMConvertFloatToHalf(Luma(&lowres[4 * i]));
+								yHalf[4 * i + 1] = zero;
+								yHalf[4 * i + 2] = zero;
+								yHalf[4 * i + 3] = one;
+							}
+							MpvTexture yPlane;
+							if (!MakeMpvTexture(dev, lw, lh, yPlane, yHalf.data(), 4 * sizeof(HALF) * lw)) {
+								Out("  luma plane texture failed\n");
+								g_failures++;
+							}
+							for (auto& shader : lumaShaders) {
+								if (!yPlane.tex) {
+									break;
+								}
+								std::string runError;
+								auto runOnce = [&]() {
+									std::map<std::string, MpvTexture> planes;
+									planes["LUMA"] = yPlane;
+									if (shader->Run(dev, ctx, "LUMA", planes, ref.W, ref.H, runError) < 0) {
+										return false;
+									}
+									const MpvTexture& y = planes["LUMA"];
+									if (y.w == (UINT)ref.W && y.h == (UINT)ref.H) {
+										ctx->CopyResource(texHigh.tex, y.tex);
+										return true;
+									}
+									if (y.w > (UINT)ref.W || catmullRom < 0) {
+										runError = std::format("left the plane at {}x{}", y.w, y.h);
+										return false;
+									}
+									return passes.Resize(dev, ctx, passes.GetMethod(catmullRom), y.srv, y.w, y.h, texHigh.rtv, ref.W, ref.H);
+								};
+								bool ok = runOnce() && runOnce();   // warm-up
+								const int kRuns = 4;
+								if (ok) {
+									ctx->Begin(disjoint);
+									ctx->End(tsStart);
+									for (int run = 0; run < kRuns && ok; run++) {
+										ok = runOnce();
+									}
+									ctx->End(tsEnd);
+									ctx->End(disjoint);
+								}
+								if (!ok) {
+									Out("  %-24s failed: %s\n", shader->Name().c_str(), runError.c_str());
+									g_failures++;
+									continue;
+								}
+								D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
+								UINT64 t0 = 0, t1 = 0;
+								while (ctx->GetData(disjoint, &dj, sizeof(dj), 0) == S_FALSE) {
+									Sleep(0);
+								}
+								while (ctx->GetData(tsStart, &t0, sizeof(t0), 0) == S_FALSE) {
+									Sleep(0);
+								}
+								while (ctx->GetData(tsEnd, &t1, sizeof(t1), 0) == S_FALSE) {
+									Sleep(0);
+								}
+								const double ms = (!dj.Disjoint && dj.Frequency) ? double(t1 - t0) * 1000.0 / dj.Frequency / kRuns : 0.0;
+
+								ctx->CopyResource(stage, texHigh.tex);
+								if (!ReadRgbaHalf(ctx, stage, ref.W, ref.H, upscaled)) {
+									Out("  %-24s readback failed\n", shader->Name().c_str());
+									g_failures++;
+									continue;
+								}
+								for (size_t p = 0; p + 3 < upscaled.size(); p += 4) {
+									upscaled[p + 1] = upscaled[p + 2] = upscaled[p];
+									upscaled[p + 3] = 1.0f;
+								}
+								const UpscaleMetrics m = Measure(upscaled, ref.rgba, ref.W, ref.H, deg.jpeg > 0 ? 8 * factor : 0);
+								Out("  %-24s %8.3f %8.3f %7.4f %7.3f %8.5f %7.3f %7.3f %6.2f ms",
+								    shader->Name().c_str(), m.psnr, m.psnrDetail, m.ssim, m.sharp, m.halo, m.grain, m.block, ms);
+								if (m.notFinite) {
+									Out("   (%lld not a number)", m.notFinite);
+									g_failures++;
+								}
+								Out("\n");
+								// Back to colour the way a renderer would do it: Catmull-Rom's picture
+								// with its luma replaced by the shader's, chroma untouched.
+								if (keptCatmull.size() == upscaled.size()) {
+									for (size_t p = 0; p + 3 < upscaled.size(); p += 4) {
+										const float delta = upscaled[p] - Luma(&keptCatmull[p]);
+										for (int k = 0; k < 3; k++) {
+											upscaled[p + k] = std::clamp(keptCatmull[p + k] + delta, 0.0f, 1.0f);
+										}
+									}
+								}
+								keptShaders[shader->Name()] = upscaled;
+							}
 						}
 
 #ifdef HAVE_ONNXRUNTIME
@@ -1119,6 +1342,25 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 							keptJinc.empty() ? nullptr : &keptJinc,
 							keptX2.empty() ? nullptr : &keptX2,
 							keptX4.empty() ? nullptr : &keptX4 }, ref.W, ref.H, detail);
+
+						// Close up on the most detailed window: the reference, the renderer's
+						// Jinc2m and Catmull-Rom, and three of the shaders, all in colour.
+						if (!keptShaders.empty()) {
+							auto kept = [&](const char* name) {
+								const auto it = keptShaders.find(name);
+								return (it == keptShaders.end()) ? nullptr : &it->second;
+							};
+							const POINT zoomAt = FindDetailWindow(ref.rgba, ref.W, ref.H, 320, 180);
+							const std::wstring zoomBoard = std::format(L"upscale_{}_{}_x{}_zoom.png", ref.name,
+								std::wstring(deg.name, deg.name + strlen(deg.name)), factor);
+							SaveZoomBoard(factory, zoomBoard.c_str(), {
+								&ref.rgba,
+								keptJinc.empty() ? nullptr : &keptJinc,
+								keptCatmull.empty() ? nullptr : &keptCatmull,
+								kept("FSRCNNX_x2_16-0-4-1"),
+								kept("ravu-zoom-ar-r3"),
+								kept("ArtCNN_C4F16") }, ref.W, ref.H, zoomAt);
+						}
 					}
 				}
 			}

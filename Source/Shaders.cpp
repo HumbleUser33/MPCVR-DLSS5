@@ -109,6 +109,13 @@ void ShaderGetPixels(
 	}
 	DLog(L"ConvertColorShader: frame consists of {} planes", planes);
 
+	// RAVU-zoom: the renderer has already brought Cb and Cr to the luma size, into
+	// t1 and t2, sited on the luma pixels. The pixel shader then only reads them.
+	const bool chromaPrescaled = bDX11 && chromaScaling == CHROMA_RAVU && fmtParams.Subsampling == 420 && planes >= 2;
+	if (chromaPrescaled) {
+		planes = 3;
+	}
+
 	const bool packed422 = (fmtParams.cformat == CF_YUY2 || fmtParams.cformat == CF_UYVY
 		|| fmtParams.cformat == CF_Y210
 		|| fmtParams.cformat == CF_Y216
@@ -156,7 +163,7 @@ void ShaderGetPixels(
 			break;
 		case 3:
 			code.append("Texture2D texY : register(t0);\n");
-			if (fmtParams.cformat == CF_YV12 || fmtParams.cformat == CF_YV16 || fmtParams.cformat == CF_YV24) {
+			if (!chromaPrescaled && (fmtParams.cformat == CF_YV12 || fmtParams.cformat == CF_YV16 || fmtParams.cformat == CF_YV24)) {
 				code.append("Texture2D texV : register(t1);\n");
 				code.append("Texture2D texU : register(t2);\n");
 			} else {
@@ -279,7 +286,7 @@ void ShaderGetPixels(
 					"colorY = (colorY * 2 + y1 + y2) / 4;\n");
 			}
 			code.append("float2 colorUV;\n");
-			if (chromaScaling == CHROMA_Nearest || fmtParams.Subsampling == 444) {
+			if (chromaScaling == CHROMA_Nearest || fmtParams.Subsampling == 444 || chromaPrescaled) {
 				code.append(
 					"colorUV[0] = texU.Sample(samp, input.Tex).r;\n"
 					"colorUV[1] = texV.Sample(samp, input.Tex).r;\n"

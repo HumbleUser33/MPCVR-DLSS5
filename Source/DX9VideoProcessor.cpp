@@ -39,7 +39,17 @@ static const ScalingShaderResId s_Upscaling9ResIDs[UPSCALE_COUNT] = {
 	{IDF_PS_9_INTERP_LANCZOS2_X,  IDF_PS_9_INTERP_LANCZOS2_Y,  L"Lanczos2"          },
 	{IDF_PS_9_INTERP_LANCZOS3_X,  IDF_PS_9_INTERP_LANCZOS3_Y,  L"Lanczos3"          },
 	{IDF_PS_9_INTERP_JINC2,       IDF_PS_9_INTERP_JINC2,       L"Jinc2m"            },
+	// The mpv prescalers need Direct3D 11: Catmull-Rom stands in.
+	{IDF_PS_9_INTERP_CATMULL4_X,  IDF_PS_9_INTERP_CATMULL4_Y,  L"Catmull-Rom"       },
+	{IDF_PS_9_INTERP_CATMULL4_X,  IDF_PS_9_INTERP_CATMULL4_Y,  L"Catmull-Rom"       },
+	{IDF_PS_9_INTERP_CATMULL4_X,  IDF_PS_9_INTERP_CATMULL4_Y,  L"Catmull-Rom"       },
 };
+
+// RAVU-zoom on chroma needs Direct3D 11 as well.
+static int ChromaScaling9(const int chromaScaling)
+{
+	return (chromaScaling == CHROMA_RAVU) ? CHROMA_CatmullRom : chromaScaling;
+}
 
 static const ScalingShaderResId s_Downscaling9ResIDs[DOWNSCALE_COUNT] = {
 	{IDF_PS_9_CONVOL_BOX_X,       IDF_PS_9_CONVOL_BOX_Y,       L"Box"          },
@@ -276,7 +286,7 @@ CDX9VideoProcessor::CDX9VideoProcessor(CMpcVideoRenderer* pFilter, const Setting
 	m_iVPDeinterlacing     = config.iVPDeinterlacing;
 	m_bDeintDouble         = config.bDeintDouble;
 	m_bVPScaling           = config.bVPScaling;
-	m_iChromaScaling       = config.iChromaScaling;
+	m_iChromaScaling       = ChromaScaling9(config.iChromaScaling);
 	m_iUpscaling           = config.iUpscaling;
 	m_iDownscaling         = config.iDownscaling;
 	m_bInterpolateAt50pct  = config.bInterpolateAt50pct;
@@ -1002,12 +1012,13 @@ void CDX9VideoProcessor::UpdateScalingStrings()
 void CDX9VideoProcessor::CalcStatsParams()
 {
 	if (m_pD3DDevEx && !m_windowRect.IsRectEmpty()) {
-		if (S_OK == m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0)) {
+		// S_FALSE: the font is already there at this size and its metrics still stand.
+		if (SUCCEEDED(m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0))) {
 			SIZE charSize = m_Font3D.GetMaxCharMetric();
-			m_StatsRect.right  = m_StatsRect.left + 61 * charSize.cx + 5 + 3;
-			m_StatsRect.bottom = m_StatsRect.top + 19 * charSize.cy + 5 + 3;
-			m_StatsBackground.Set(m_StatsRect, D3DCOLOR_ARGB(80, 0, 0, 0));
+			m_StatsRect.right  = m_StatsRect.left + m_StatsColumns * charSize.cx + 5 + 3;
+			m_StatsRect.bottom = m_StatsRect.top + m_StatsLines * charSize.cy + 5 + 3 + kStatsMarkerH + 1;
 		}
+		m_StatsBackground.Set(m_StatsRect, D3DCOLOR_ARGB(80, 0, 0, 0));
 
 		CalcGraphParams();
 		m_Underlay.Set(m_GraphRect, D3DCOLOR_ARGB(80, 0, 0, 0));
@@ -1965,8 +1976,8 @@ void CDX9VideoProcessor::Configure(const Settings_t& config)
 		changeVP = true; // temporary solution
 	}
 
-	if (config.iChromaScaling != m_iChromaScaling) {
-		m_iChromaScaling = config.iChromaScaling;
+	if (ChromaScaling9(config.iChromaScaling) != m_iChromaScaling) {
+		m_iChromaScaling = ChromaScaling9(config.iChromaScaling);
 		changeConvertShader = m_PSConvColorData.bEnable && (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422);
 	}
 
@@ -2990,6 +3001,10 @@ void CDX9VideoProcessor::UpdateStatsStatic()
 		m_strStatsVProc.assign(L"\nVideoProcessor: ");
 		if (m_DXVA2VP.IsReady()) {
 			m_strStatsVProc += std::format(L"DXVA2 VP, output to {}", D3DFormatToString(m_DXVA2OutputFmt));
+			// It converts the picture itself, chroma upsampling included.
+			if (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422) {
+				m_strStatsVProc.append(L", converts chroma");
+			}
 		} else {
 			m_strStatsVProc.append(L"Shaders");
 			if (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422) {
@@ -3149,16 +3164,22 @@ HRESULT CDX9VideoProcessor::DrawStats(IDirect3DSurface9* pRenderTarget)
 		m_RenderStats.t6 * 1000 / GetPreciseTicksPerSecond());
 #endif
 
+	// The box is made to fit the text.
+	if (UpdateStatsLayout(str)) {
+		CalcStatsParams();
+	}
+
 	HRESULT hr = S_OK;
 	hr = m_pD3DDevEx->SetRenderTarget(0, pRenderTarget);
 
 	m_StatsBackground.Draw();
 	hr = m_Font3D.Draw2DText(m_StatsTextPoint.x, m_StatsTextPoint.y, D3DCOLOR_XRGB(255, 255, 255), str.c_str());
-	static int col = m_StatsRect.right;
-	if (--col < m_StatsRect.left) {
-		col = m_StatsRect.right;
+	// The marker scrolls along the bottom of the box, and starts over when the box has
+	// moved under it.
+	if (--m_StatsMarkerX < m_StatsRect.left || m_StatsMarkerX > m_StatsRect.right) {
+		m_StatsMarkerX = m_StatsRect.right;
 	}
-	m_Rect3D.Set({ col, m_StatsRect.bottom - 11, col + 5, m_StatsRect.bottom - 1 }, D3DCOLOR_XRGB(128, 255, 128));
+	m_Rect3D.Set({ m_StatsMarkerX, m_StatsRect.bottom - kStatsMarkerH - 1, m_StatsMarkerX + 5, m_StatsRect.bottom - 1 }, D3DCOLOR_XRGB(128, 255, 128));
 	m_Rect3D.Draw();
 
 	if (CheckGraphPlacement()) {

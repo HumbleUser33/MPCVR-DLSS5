@@ -123,6 +123,7 @@ void CVRMainPPage::SetControls()
 	CheckDlgButton(IDC_CHECK15, m_SetsPP.bVBlankBeforePresent ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK13, m_SetsPP.bAdjustPresentTime   ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK16, m_SetsPP.bReinitByDisplay     ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_CHECK26, m_SetsPP.bDlssRenderAhead     ? BST_CHECKED : BST_UNCHECKED);
 
 	SendDlgItemMessageW(IDC_COMBO6, CB_SETCURSEL, m_SetsPP.iResizeStats, 0);
 
@@ -169,11 +170,38 @@ void CVRMainPPage::EnableControls()
 	GetDlgItem(IDC_SLIDER2).EnableWindow(m_SetsPP.bConvertToSdr);
 	GetDlgItem(IDC_EDIT_DISPLAYMAX).EnableWindow(m_SetsPP.bHdrLocalToneMapping);
 
-	// DLSS Super Resolution, set on the DLSS 5 page, enlarges the picture in
-	// Direct3D 11 mode; the Upscaling method then only stands in where it cannot.
-	const BOOL bUpscalingList = !(m_SetsPP.bUseD3D11 && m_SetsPP.bDlssSR);
+	// What the video processor takes, the shaders never see. It converts the formats
+	// ticked above, chroma upsampling included, and resizes as well when "Use for
+	// resizing" is on -- except while DLSS 5 NR or DLSS Super Resolution runs, which
+	// keeps it at the source size and hands the resizing back to the shaders.
+	// DLSS Super Resolution enlarges in its place, so the Upscaling method then only
+	// stands in where it cannot run.
+	// While something plays, the renderer also says what it is really doing with it,
+	// and a list is only greyed when both agree that it has nothing to do: the format
+	// boxes are a rule of thumb, since Dolby Vision, YCgCo and RGB on Nvidia go
+	// through the shaders whatever is ticked.
+	const bool bAllVPFormats = m_SetsPP.VPFmts.bNV12 && m_SetsPP.VPFmts.bP01x
+		&& m_SetsPP.VPFmts.bYUY2 && m_SetsPP.VPFmts.bOther;
+	const bool bVPAvailable = !(m_SetsPP.bUseD3D11 && !IsWindows8OrGreater()); // no D3D11 VP on Windows 7
+	const bool bDlssPass = m_SetsPP.bUseD3D11 && (m_SetsPP.bDlssNR || m_SetsPP.bDlssSR);
+	const bool bVPConverts = bAllVPFormats && bVPAvailable
+		&& (!m_bRendererActive || (m_uVPUse & VPUSE_Converting));
+	const bool bVPResizes = bVPConverts && m_SetsPP.bVPScaling && !bDlssPass
+		&& (!m_bRendererActive || (m_uVPUse & VPUSE_Resizing));
+
+	const BOOL bChromaList = !bVPConverts;
+	const BOOL bDownscalingList = !bVPResizes;
+	const BOOL bUpscalingList = !bVPResizes && !(m_SetsPP.bUseD3D11 && m_SetsPP.bDlssSR);
+	GetDlgItem(IDC_STATIC40).EnableWindow(bChromaList);
+	GetDlgItem(IDC_COMBO5).EnableWindow(bChromaList);
 	GetDlgItem(IDC_STATIC39).EnableWindow(bUpscalingList);
 	GetDlgItem(IDC_COMBO2).EnableWindow(bUpscalingList);
+	GetDlgItem(IDC_STATIC41).EnableWindow(bDownscalingList);
+	GetDlgItem(IDC_COMBO3).EnableWindow(bDownscalingList);
+	GetDlgItem(IDC_CHECK6).EnableWindow(bUpscalingList || bDownscalingList);
+
+	// Render ahead belongs to the Direct3D 11 processor.
+	GetDlgItem(IDC_CHECK26).EnableWindow(m_SetsPP.bUseD3D11);
 }
 
 HRESULT CVRMainPPage::OnConnect(IUnknown *pUnk)
@@ -213,6 +241,8 @@ HRESULT CVRMainPPage::OnActivate()
 
 	m_pVideoRenderer->GetSettings(m_SetsPP);
 	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
+	m_bRendererActive = m_pVideoRenderer->GetActive();
+	m_uVPUse = m_bRendererActive ? m_pVideoRenderer->GetVideoProcessorUse() : 0;
 
 	if (!IsWindows7SP1OrGreater()) {
 		GetDlgItem(IDC_CHECK1).EnableWindow(FALSE);
@@ -264,6 +294,7 @@ HRESULT CVRMainPPage::OnActivate()
 	SendDlgItemMessageW(IDC_COMBO5, CB_ADDSTRING, 0, (LPARAM)L"Nearest-neighbor");
 	SendDlgItemMessageW(IDC_COMBO5, CB_ADDSTRING, 0, (LPARAM)L"Bilinear");
 	SendDlgItemMessageW(IDC_COMBO5, CB_ADDSTRING, 0, (LPARAM)L"Catmull-Rom");
+	SendDlgItemMessageW(IDC_COMBO5, CB_ADDSTRING, 0, (LPARAM)L"RAVU-zoom");
 
 	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Nearest-neighbor");
 	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Mitchell-Netravali");
@@ -271,6 +302,9 @@ HRESULT CVRMainPPage::OnActivate()
 	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Lanczos2");
 	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Lanczos3");
 	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Jinc2m");
+	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"FSRCNNX 8");
+	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"FSRCNNX 16");
+	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"RAVU-zoom");
 
 	SendDlgItemMessageW(IDC_COMBO3, CB_ADDSTRING, 0, (LPARAM)L"Box");
 	SendDlgItemMessageW(IDC_COMBO3, CB_ADDSTRING, 0, (LPARAM)L"Bilinear");
@@ -307,7 +341,9 @@ HRESULT CVRMainPPage::OnActivate()
 
 	AddHint(IDC_CHECK5,
 		L"It works fast, but it's not always good.\n"
-		"Disable it if you want to use shaders for resizing.");
+		"Disable it if you want to use shaders for resizing.\n"
+		"It only covers the formats ticked above, and DLSS takes\n"
+		"the resizing back from it while it runs.");
 	AddHint(IDC_COMBO8,
 		L"Available for Direct3D 11.\n"
 		"Requires hardware and driver support:\n"
@@ -318,32 +354,71 @@ HRESULT CVRMainPPage::OnActivate()
 		"Requires hardware and driver support:\n"
 		"- Nvidia RTX (x64 only)");
 	AddHint(IDC_COMBO5,
-		L"Used for YUV 4:2:0/4:2:2 input formats\n"
-		"when the DVXA2/D3D11 Video Processor is not active.");
+		L"Used for YUV 4:2:0/4:2:2 input formats when the video\n"
+		"processor does not convert them: it does its own chroma.\n"
+		"Greyed while the video processor is converting what plays,\n"
+		"and when every format above is ticked; it still stands in\n"
+		"for what the video processor refuses (Dolby Vision, YCgCo,\n"
+		"RGB on Nvidia).\n"
+		"RAVU-zoom (mpv prescaler on Cb and Cr): Direct3D 11,\n"
+		"4:2:0 only; Catmull-Rom is used elsewhere.");
 	AddHint(IDC_COMBO2,
 		L"Used to increase image size when the\n"
 		"DVXA2/D3D11 Video Processor is not used for resizing.\n"
-		"Greyed while DLSS Super Resolution handles upscaling\n"
-		"(DLSS 5 page); it then only stands in where DLSS cannot run.");
+		"FSRCNNX 8/16 double the luma through a small network,\n"
+		"RAVU-zoom enlarges it to any size; the colour comes from\n"
+		"Catmull-Rom, which also covers the rest of the scale.\n"
+		"They need Direct3D 11; Catmull-Rom stands in elsewhere.\n"
+		"Greyed while the video processor is resizing what plays, or\n"
+		"while DLSS Super Resolution handles upscaling (DLSS page);\n"
+		"it then only stands in where they cannot run.");
 	AddHint(IDC_COMBO3,
-		L"Used to reduce image size when the\n"
-		"DVXA2/D3D11 Video Processor is not used for resizing.");
+		L"Used to reduce image size when the video processor does\n"
+		"not resize. Greyed while it is resizing what plays; DLSS\n"
+		"hands the resizing back to these shaders.");
 	AddHint(IDC_COMBO4,
 		L"'Flip' is more efficient, but 'Discard' may work\n"
 		"more correctly in some rare situations.");
+	AddHint(IDC_CHECK26,
+		L"Available for Direct3D 11.\n"
+		"Starts each picture earlier by the time the heavy passes\n"
+		"take -- DLSS 5 NR, DLSS Super Resolution, FSRCNNX and\n"
+		"RAVU-zoom -- and holds it until its own time, so they do\n"
+		"not make the video late against the audio.\n"
+		"It does nothing while none of them runs.");
+
+	// The frame never tells this page that another one applied something, and it does
+	// not always send WM_SHOWWINDOW when the tab comes back either.
+	SetTimer(kRefreshTimer, 500);
+
+	return S_OK;
+}
+
+HRESULT CVRMainPPage::OnDeactivate()
+{
+	KillTimer(kRefreshTimer);
 
 	return S_OK;
 }
 
 INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-	if (uMsg == WM_SHOWWINDOW && wParam && m_pVideoRenderer) {
-		// Back from the DLSS 5 page: DLSS Super Resolution may have been switched
-		// there and applied. Only those fields are taken, not edits made here.
+	if ((uMsg == WM_TIMER && wParam == kRefreshTimer || uMsg == WM_SHOWWINDOW && wParam) && m_pVideoRenderer) {
+		// What the DLSS page holds is read back from the renderer, and so is what it is
+		// doing with the picture: both decide part of the greying here. Only those
+		// fields are taken, never an edit made on this page, and nothing is touched
+		// while nothing has moved.
 		Settings_t current;
 		m_pVideoRenderer->GetSettings(current);
-		CopyDlssSettings(m_SetsPP, current);
-		EnableControls();
+		const bool bActive = m_pVideoRenderer->GetActive();
+		const unsigned uVPUse = bActive ? m_pVideoRenderer->GetVideoProcessorUse() : 0;
+		if (current.bDlssNR != m_SetsPP.bDlssNR || current.bDlssSR != m_SetsPP.bDlssSR
+				|| bActive != m_bRendererActive || uVPUse != m_uVPUse || uMsg == WM_SHOWWINDOW) {
+			CopyDlssSettings(m_SetsPP, current);
+			m_bRendererActive = bActive;
+			m_uVPUse = uVPUse;
+			EnableControls();
+		}
 	}
 
 	if (uMsg == WM_COMMAND) {
@@ -371,8 +446,7 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 			if (nID == IDC_CHECK5) {
 				m_SetsPP.bVPScaling = IsDlgButtonChecked(IDC_CHECK5) == BST_CHECKED;
 				SetDirty();
-				GetDlgItem(IDC_STATIC7).EnableWindow(m_SetsPP.bVPScaling && m_SetsPP.bUseD3D11 && IsWindows10OrGreater());
-				GetDlgItem(IDC_COMBO8).EnableWindow(m_SetsPP.bVPScaling && m_SetsPP.bUseD3D11 && IsWindows10OrGreater());
+				EnableControls(); // Super Resolution follows it, and so do the shader lists
 				return (LRESULT)1;
 			}
 			if (nID == IDC_CHECK6) {
@@ -380,24 +454,29 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				SetDirty();
 				return (LRESULT)1;
 			}
+			// What the video processor takes decides which shader lists still serve.
 			if (nID == IDC_CHECK7) {
 				m_SetsPP.VPFmts.bNV12 = IsDlgButtonChecked(IDC_CHECK7) == BST_CHECKED;
 				SetDirty();
+				EnableControls();
 				return (LRESULT)1;
 			}
 			if (nID == IDC_CHECK8) {
 				m_SetsPP.VPFmts.bP01x = IsDlgButtonChecked(IDC_CHECK8) == BST_CHECKED;
 				SetDirty();
+				EnableControls();
 				return (LRESULT)1;
 			}
 			if (nID == IDC_CHECK9) {
 				m_SetsPP.VPFmts.bYUY2 = IsDlgButtonChecked(IDC_CHECK9) == BST_CHECKED;
 				SetDirty();
+				EnableControls();
 				return (LRESULT)1;
 			}
 			if (nID == IDC_CHECK4) {
 				m_SetsPP.VPFmts.bOther = IsDlgButtonChecked(IDC_CHECK4) == BST_CHECKED;
 				SetDirty();
+				EnableControls();
 				return (LRESULT)1;
 			}
 			if (nID == IDC_CHECK10) {
@@ -427,6 +506,11 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 			}
 			if (nID == IDC_CHECK16) {
 				m_SetsPP.bReinitByDisplay = IsDlgButtonChecked(IDC_CHECK16) == BST_CHECKED;
+				SetDirty();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_CHECK26) {
+				m_SetsPP.bDlssRenderAhead = IsDlgButtonChecked(IDC_CHECK26) == BST_CHECKED;
 				SetDirty();
 				return (LRESULT)1;
 			}
@@ -633,7 +717,7 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	// if not error then set to m_setsPP
 	m_SetsPP.iHdrDisplayMaxNits = displayMaxNits;
 
-	// The DLSS 5 settings live on their own page, and the toggle key changes them
+	// The DLSS settings live on their own page, and the toggle key changes them
 	// while this one is open: keep what the renderer holds for them.
 	{
 		Settings_t current;
@@ -645,6 +729,8 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	m_pVideoRenderer->SaveSettings();
 
 	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
+
+	EnableControls(); // what was just applied decides part of the greying
 
 	return S_OK;
 }

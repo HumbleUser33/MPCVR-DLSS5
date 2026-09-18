@@ -32,6 +32,7 @@
 #include "../Include/ID3DVideoMemoryConfiguration.h"
 #include "Shaders.h"
 #include "Utils/CPUInfo.h"
+#include "Upscale/MpvShaderTables.h"
 
 #include <dxgi1_6.h>
 
@@ -98,7 +99,35 @@ static const ScalingShaderResId s_Upscaling11ResIDs[UPSCALE_COUNT] = {
 	{IDF_PS_11_INTERP_LANCZOS2_X,  IDF_PS_11_INTERP_LANCZOS2_Y,  L"Lanczos2"          },
 	{IDF_PS_11_INTERP_LANCZOS3_X,  IDF_PS_11_INTERP_LANCZOS3_Y,  L"Lanczos3"          },
 	{IDF_PS_11_INTERP_JINC2,       IDF_PS_11_INTERP_JINC2,       L"Jinc2m"            },
+	// The mpv prescalers: Catmull-Rom for the colour, for the scale they leave, and
+	// wherever they cannot run.
+	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"FSRCNNX 8"         },
+	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"FSRCNNX 16"        },
+	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"RAVU-zoom"         },
 };
+
+static const MpvShaderInfo* MpvLumaShader(const int upscaling)
+{
+	switch (upscaling) {
+	case UPSCALE_FSRCNNX8:  return &kMpvFSRCNNX8;
+	case UPSCALE_FSRCNNX16: return &kMpvFSRCNNX16;
+	case UPSCALE_RAVUZoom:  return &kMpvRavuZoomAR3;
+	default:                return nullptr;
+	}
+}
+
+// The compiled passes and tables of the mpv prescalers, from the resources.
+static bool MpvResource(UINT resid, const BYTE*& data, size_t& size)
+{
+	LPVOID pData = nullptr;
+	DWORD dwSize = 0;
+	if (S_OK != GetDataFromResource(pData, dwSize, resid)) {
+		return false;
+	}
+	data = (const BYTE*)pData;
+	size = dwSize;
+	return true;
+}
 
 static const ScalingShaderResId s_Downscaling11ResIDs[DOWNSCALE_COUNT] = {
 	{IDF_PS_11_CONVOL_BOX_X,       IDF_PS_11_CONVOL_BOX_Y,       L"Box"          },
@@ -699,6 +728,18 @@ void CDX11VideoProcessor::ReleaseVP()
 	m_RenderAhead.Reset();
 	m_DlssNRTimes.Reset();
 
+	m_TexMpvLuma.Release();
+	m_TexMpvResize.Release();
+	m_TexMpvColor.Release();
+	m_TexMpvOutput.Release();
+	m_TexMpvLumaOut.Release();
+	for (int c = 0; c < 2; c++) {
+		m_TexMpvChromaIn[c].Release();
+		m_TexMpvChromaOut[c].Release();
+	}
+	m_bMpvChromaActive = false;
+	m_bMpvChromaFailed = false;
+
 	m_PSConvColorData.Release();
 	m_pDoviCurvesConstantBuffer.Release();
 
@@ -755,6 +796,13 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_strShaderX = nullptr;
 	m_strShaderY = nullptr;
 	m_pPSFinalPass.Release();
+
+	m_MpvLuma.Release();
+	m_MpvChroma.Release();
+	m_pPSMpvLuma.Release();
+	m_pPSMpvCombine.Release();
+	m_pPSMpvChromaPlane.Release();
+	m_pMpvChromaPlaneConstants.Release();
 
 	m_pCorrectionConstants.Release();
 	m_pPostScaleConstants.Release();
@@ -1226,8 +1274,12 @@ void CDX11VideoProcessor::UpdateScalingStrings()
 		h1 = m_srcRectHeight;
 	}
 	// DLSS Super Resolution takes over when the picture grows on both axes.
-	const wchar_t* upscaling = (m_bDlssSRActive && w2 > w1 && h2 > h1)
-		? L"DLSS SR" : s_Upscaling11ResIDs[m_iUpscaling].description;
+	const bool bDlssSR = m_bDlssSRActive && w2 > w1 && h2 > h1;
+	const wchar_t* upscaling = bDlssSR ? L"DLSS SR" : s_Upscaling11ResIDs[m_iUpscaling].description;
+	// An mpv prescaler only where it runs; Catmull-Rom does the job elsewhere.
+	if (!bDlssSR && MpvLumaShader(m_iUpscaling) && !m_MpvLuma.Applies(w1, h1, w2, h2)) {
+		upscaling = L"Catmull-Rom";
+	}
 	m_strShaderX = (w1 == w2) ? nullptr
 		: (w1 > k * w2)
 		? s_Downscaling11ResIDs[m_iDownscaling].description
@@ -1243,10 +1295,12 @@ void CDX11VideoProcessor::CalcStatsParams()
 	if (m_pDeviceContext && !m_windowRect.IsRectEmpty()) {
 		SIZE rtSize = m_windowRect.Size();
 
-		if (S_OK == m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0)) {
+		// S_FALSE: the font is already there at this size and its metrics still stand,
+		// which is the usual answer once the box has to follow a new line count.
+		if (SUCCEEDED(m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0))) {
 			SIZE charSize = m_Font3D.GetMaxCharMetric();
-			m_StatsRect.right  = m_StatsRect.left + 61 * charSize.cx + 5 + 3;
-			m_StatsRect.bottom = m_StatsRect.top + m_iStatsLines * charSize.cy + 5 + 3;
+			m_StatsRect.right  = m_StatsRect.left + m_StatsColumns * charSize.cx + 5 + 3;
+			m_StatsRect.bottom = m_StatsRect.top + m_StatsLines * charSize.cy + 5 + 3 + kStatsMarkerH + 1;
 		}
 		m_StatsBackground.Set(m_StatsRect, rtSize, D3DCOLOR_ARGB(80, 0, 0, 0));
 
@@ -1411,6 +1465,10 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 
 	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPS_Simple, IDF_PS_11_SIMPLE));
 
+	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPSMpvLuma, IDF_PS_11_MPV_LUMA));
+	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPSMpvCombine, IDF_PS_11_MPV_COMBINE));
+	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPSMpvChromaPlane, IDF_PS_11_MPV_CHROMA_PLANE));
+
 #if TEST_SHADER
 	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPS_TEST, IDF_PS_11_TEST));
 #endif
@@ -1424,6 +1482,7 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 	BufferDesc = { sizeof(FLOAT) * 4, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
 	EXECUTE_ASSERT(S_OK == m_pDevice->CreateBuffer(&BufferDesc, nullptr, &m_pHalfOUtoInterlaceConstantBuffer));
 	EXECUTE_ASSERT(S_OK == m_pDevice->CreateBuffer(&BufferDesc, nullptr, &m_pFinalPassConstantBuffer));
+	EXECUTE_ASSERT(S_OK == m_pDevice->CreateBuffer(&BufferDesc, nullptr, &m_pMpvChromaPlaneConstants));
 
 	BufferDesc = { sizeof(PS_EXTSHADER_CONSTANTS), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
 	EXECUTE_ASSERT(S_OK == m_pDevice->CreateBuffer(&BufferDesc, nullptr, &m_pPostScaleConstants));
@@ -2794,8 +2853,9 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		}
 	}
 
-	// GPU time of each DLSS stage, only while the statistics show it.
-	const bool bTimeDlss = m_bShowStats && (m_bDlssNRActive || m_bDlssSRActive);
+	// GPU time of each DLSS stage and of the mpv prescalers, only while the
+	// statistics show it.
+	const bool bTimeDlss = m_bShowStats && (m_bDlssNRActive || m_bDlssSRActive || m_MpvLuma.IsLoaded() || m_bMpvChromaActive);
 	if (bTimeDlss) {
 		m_DlssStageTimes.Collect(m_pDeviceContext);
 		m_DlssStageTimes.BeginFrame(m_pDevice, m_pDeviceContext);
@@ -3186,7 +3246,199 @@ void CDX11VideoProcessor::UpdateUpscalingShaders()
 		}
 	}
 
+	UpdateMpvLuma();
 	UpdateScalingStrings();
+}
+
+void CDX11VideoProcessor::UpdateMpvLuma()
+{
+	const MpvShaderInfo* pInfo = m_pDevice ? MpvLumaShader(m_iUpscaling) : nullptr;
+	if (m_MpvLuma.Info() == pInfo) {
+		return;
+	}
+
+	m_MpvLuma.Release();
+	m_TexMpvLuma.Release();
+	m_TexMpvResize.Release();
+	m_TexMpvColor.Release();
+	m_TexMpvOutput.Release();
+	m_TexMpvLumaOut.Release();
+	if (pInfo) {
+		// Feature level 10.x cannot run them: Catmull-Rom stays in their place.
+		const HRESULT hr = m_MpvLuma.Load(m_pDevice, *pInfo, IDF_VS_11_MPV_HOOK, MpvResource);
+		DLogIf(FAILED(hr), L"CDX11VideoProcessor::UpdateMpvLuma() : {} not loaded, error {}", pInfo->name, HR2Str(hr));
+	}
+}
+
+HRESULT CDX11VideoProcessor::MpvLumaPass(Tex2D_t* pInputTexture, const CRect& rSrc, const CRect& dstRect, const int rotation, Tex2D_t** ppResult)
+{
+	if (!pInputTexture || !ppResult) {
+		return E_POINTER;
+	}
+
+	// Sizes before rotation: ResizeShaderPass turns the picture afterwards.
+	const bool bTurned = (rotation == 90 || rotation == 270);
+	const UINT inW = rSrc.Width(), inH = rSrc.Height();
+	const UINT outW = bTurned ? dstRect.Height() : dstRect.Width();
+	const UINT outH = bTurned ? dstRect.Width() : dstRect.Height();
+	UINT w = 0, h = 0;
+	if (!m_MpvLuma.Applies(inW, inH, outW, outH, &w, &h)) {
+		return S_FALSE; // not enlarged enough for it: the resize shaders do the job
+	}
+
+	m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::MpvLuma);
+
+	const auto Run = [&]() {
+		// The luma the network enlarges...
+		HRESULT hr = m_TexMpvLuma.CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, inW, inH, Tex2D_DefaultShaderRTarget);
+		if (S_OK == hr) {
+			hr = TextureCopyRect(*pInputTexture, m_TexMpvLuma.pTexture, rSrc, CRect(0, 0, inW, inH), m_pPSMpvLuma, nullptr, 0, false);
+		}
+		if (S_OK == hr) {
+			hr = m_MpvLuma.Process(m_pDeviceContext, m_TexMpvLuma.pShaderResource, inW, inH, outW, outH, 0.0f, 0.0f, m_TexMpvLumaOut);
+		}
+		if (S_OK != hr) {
+			return hr;
+		}
+
+		// ... the colour Catmull-Rom enlarges to the same size ...
+		const CRect rResize(0, 0, w, inH);
+		const CRect rOut(0, 0, w, h);
+		hr = m_TexMpvResize.CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, w, inH, Tex2D_DefaultShaderRTarget);
+		if (S_OK == hr) {
+			hr = m_TexMpvColor.CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, w, h, Tex2D_DefaultShaderRTarget);
+		}
+		if (S_OK == hr) {
+			hr = TextureResizeShader(*pInputTexture, m_TexMpvResize.pTexture, rSrc, rResize, m_pShaderUpscaleX, 0, false);
+		}
+		if (S_OK == hr) {
+			hr = TextureResizeShader(m_TexMpvResize, m_TexMpvColor.pTexture, rResize, rOut, m_pShaderUpscaleY, 0, false);
+		}
+
+		// ... and takes the network's luma.
+		if (S_OK == hr) {
+			hr = m_TexMpvOutput.CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, w, h, Tex2D_DefaultShaderRTarget);
+		}
+		if (S_OK == hr) {
+			m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexMpvLumaOut.pShaderResource.p);
+			hr = TextureCopyRect(m_TexMpvColor, m_TexMpvOutput.pTexture, rOut, rOut, m_pPSMpvCombine, nullptr, 0, false);
+			ID3D11ShaderResourceView* views[1] = {};
+			m_pDeviceContext->PSSetShaderResources(1, 1, views);
+		}
+		return hr;
+	};
+	const HRESULT hr = Run();
+
+	m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::MpvLuma);
+
+	if (hr != S_OK) {
+		// Latch off rather than failing on every picture: Catmull-Rom takes over.
+		DLog(L"CDX11VideoProcessor::MpvLumaPass() : {} failed with error {}", m_MpvLuma.Info()->name, HR2Str(hr));
+		m_MpvLuma.Release();
+		UpdateScalingStrings();
+		UpdateStatsStatic();
+		return FAILED(hr) ? hr : E_FAIL;
+	}
+
+	*ppResult = &m_TexMpvOutput;
+	return S_OK;
+}
+
+void CDX11VideoProcessor::UpdateMpvChroma()
+{
+	// The shader video processor on 4:2:0 in two or three planes; the passes need
+	// feature level 11.0.
+	const bool bWanted = m_iChromaScaling == CHROMA_RAVU && !m_bMpvChromaFailed
+		&& m_srcParams.Subsampling == 420
+		&& m_srcParams.pDX11Planes && m_srcParams.pDX11Planes->FmtPlane2
+		&& m_pDevice && m_pDevice->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_0;
+
+	if (bWanted && !m_MpvChroma.IsLoaded()) {
+		const HRESULT hr = m_MpvChroma.Load(m_pDevice, kMpvRavuZoomAR3, IDF_VS_11_MPV_HOOK, MpvResource);
+		DLogIf(FAILED(hr), L"CDX11VideoProcessor::UpdateMpvChroma() : RAVU-zoom not loaded, error {}", HR2Str(hr));
+	} else if (!bWanted && m_MpvChroma.IsLoaded()) {
+		m_MpvChroma.Release();
+		for (int c = 0; c < 2; c++) {
+			m_TexMpvChromaIn[c].Release();
+			m_TexMpvChromaOut[c].Release();
+		}
+	}
+	m_bMpvChromaActive = bWanted && m_MpvChroma.IsLoaded();
+}
+
+HRESULT CDX11VideoProcessor::MpvChromaPass()
+{
+	const UINT texW = m_TexSrcVideo.desc.Width;
+	const UINT texH = m_TexSrcVideo.desc.Height;
+	const UINT chromaW = texW / m_srcParams.pDX11Planes->div_chroma_w;
+	const UINT chromaH = texH / m_srcParams.pDX11Planes->div_chroma_h;
+
+	// Cb and Cr where the conversion shader reads them: both in one plane, or in
+	// planes of their own, Cr first for YV12.
+	const bool bPlanar = m_TexSrcVideo.pShaderResource3 != nullptr;
+	const bool bCrFirst = m_srcParams.cformat == CF_YV12 || m_srcParams.cformat == CF_YV16 || m_srcParams.cformat == CF_YV24;
+	ID3D11ShaderResourceView* const planes[2] = {
+		(bPlanar && bCrFirst) ? m_TexSrcVideo.pShaderResource3 : m_TexSrcVideo.pShaderResource2,
+		!bPlanar ? m_TexSrcVideo.pShaderResource2 : bCrFirst ? m_TexSrcVideo.pShaderResource2 : m_TexSrcVideo.pShaderResource3,
+	};
+	const FLOAT channels[2][4] = {
+		{ 1, 0, 0, 0 },
+		{ bPlanar ? 1.0f : 0.0f, bPlanar ? 0.0f : 1.0f, 0, 0 },
+	};
+
+	// Where chroma sits among the luma pixels, as the conversion shader has it:
+	// MPEG-2 on the left column, co-sited on the top row as well, MPEG-1 centred.
+	float shiftX = 0.5f / texW;
+	float shiftY = 0.0f;
+	switch (m_srcExFmt.VideoChromaSubsampling) {
+	case DXVA2_VideoChromaSubsampling_Cosited:
+		shiftY = 0.5f / texH;
+		break;
+	case DXVA2_VideoChromaSubsampling_MPEG1:
+		shiftX = 0.0f;
+		break;
+	}
+
+	HRESULT hr = S_OK;
+	for (int c = 0; c < 2 && hr == S_OK; c++) {
+		if (!planes[c]) {
+			return E_POINTER;
+		}
+		hr = m_TexMpvChromaIn[c].CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, chromaW, chromaH, Tex2D_DefaultShaderRTarget);
+		if (FAILED(hr)) {
+			break;
+		}
+
+		D3D11_MAPPED_SUBRESOURCE mr;
+		hr = m_pDeviceContext->Map(m_pMpvChromaPlaneConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr);
+		if (FAILED(hr)) {
+			break;
+		}
+		memcpy(mr.pData, channels[c], sizeof(channels[c]));
+		m_pDeviceContext->Unmap(m_pMpvChromaPlaneConstants, 0);
+
+		CComPtr<ID3D11RenderTargetView> pRenderTargetView;
+		hr = m_pDevice->CreateRenderTargetView(m_TexMpvChromaIn[c].pTexture, nullptr, &pRenderTargetView);
+		if (FAILED(hr)) {
+			break;
+		}
+		const CRect rect(0, 0, chromaW, chromaH);
+		hr = FillVertexBuffer(m_pDeviceContext, m_pVertexBuffer, chromaW, chromaH, rect, 0, false);
+		if (FAILED(hr)) {
+			break;
+		}
+		D3D11_VIEWPORT VP = { 0.0f, 0.0f, (FLOAT)chromaW, (FLOAT)chromaH, 0.0f, 1.0f };
+		TextureBlt11(m_pDeviceContext, pRenderTargetView, VP, m_pVSimpleInputLayout, m_pVS_Simple, m_pPSMpvChromaPlane,
+			planes[c], m_pSamplerPoint, m_pMpvChromaPlaneConstants, m_pVertexBuffer);
+
+		hr = m_MpvChroma.Process(m_pDeviceContext, m_TexMpvChromaIn[c].pShaderResource, chromaW, chromaH, texW, texH,
+			shiftX, shiftY, m_TexMpvChromaOut[c]);
+		if (hr == S_OK && (m_TexMpvChromaOut[c].width != texW || m_TexMpvChromaOut[c].height != texH)) {
+			hr = E_FAIL;
+		}
+	}
+
+	return FAILED(hr) ? hr : (hr == S_OK ? S_OK : E_FAIL);
 }
 
 void CDX11VideoProcessor::UpdateDownscalingShaders()
@@ -3212,11 +3464,16 @@ HRESULT CDX11VideoProcessor::UpdateConvertColorShader()
 
 	MediaSideDataDOVIMetadata* pDOVIMetadata = m_Dovi.bValid ? &m_Dovi.msd : nullptr;
 
+	// RAVU-zoom where it runs, Catmull-Rom in its place elsewhere.
+	UpdateMpvChroma();
+	const int chromaScaling = m_bMpvChromaActive ? CHROMA_RAVU
+		: (m_iChromaScaling == CHROMA_RAVU) ? CHROMA_CatmullRom : m_iChromaScaling;
+
 	HRESULT hr = GetShaderConvertColor(true,
 		m_srcWidth,
 		m_TexSrcVideo.desc.Width, m_TexSrcVideo.desc.Height,
 		m_srcRect, m_srcParams, m_srcExFmt, pDOVIMetadata,
-		m_iChromaScaling, convertType, false,
+		chromaScaling, convertType, false,
 		&pShaderCode);
 	if (S_OK == hr) {
 		hr = m_pDevice->CreatePixelShader(pShaderCode->GetBufferPointer(), pShaderCode->GetBufferSize(), nullptr, &m_pPSConvertColor);
@@ -3228,7 +3485,7 @@ HRESULT CDX11VideoProcessor::UpdateConvertColorShader()
 			m_srcWidth,
 			m_TexSrcVideo.desc.Width, m_TexSrcVideo.desc.Height,
 			m_srcRect, m_srcParams, m_srcExFmt, pDOVIMetadata,
-			m_iChromaScaling, convertType, true,
+			chromaScaling, convertType, true,
 			&pShaderCode);
 		if (S_OK == hr) {
 			hr = m_pDevice->CreatePixelShader(pShaderCode->GetBufferPointer(), pShaderCode->GetBufferSize(), nullptr, &m_pPSConvertColorDeint);
@@ -3238,6 +3495,7 @@ HRESULT CDX11VideoProcessor::UpdateConvertColorShader()
 
 	if (FAILED(hr)) {
 		ASSERT(0);
+		m_bMpvChromaActive = false; // the stock shaders read the chroma planes
 		UINT resid = 0;
 		if (m_srcParams.cformat == CF_YUY2) {
 			resid = IDF_PS_11_CONVERT_YUY2;
@@ -3308,6 +3566,20 @@ HRESULT CDX11VideoProcessor::D3D11VPPass(ID3D11Texture2D* pRenderTarget, const C
 
 HRESULT CDX11VideoProcessor::ConvertColorPass(ID3D11Texture2D* pRenderTarget)
 {
+	// RAVU-zoom first: it sets up the pipeline its own way.
+	if (m_bMpvChromaActive) {
+		m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::MpvChroma);
+		const HRESULT hrChroma = MpvChromaPass();
+		m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::MpvChroma);
+		if (FAILED(hrChroma)) {
+			// Latched off: the conversion shader goes back to reading the planes.
+			DLog(L"CDX11VideoProcessor::ConvertColorPass() : RAVU-zoom on chroma failed with error {}", HR2Str(hrChroma));
+			m_bMpvChromaFailed = true;
+			UpdateConvertColorShader();
+			UpdateStatsStatic();
+		}
+	}
+
 	CComPtr<ID3D11RenderTargetView> pRenderTargetView;
 
 	HRESULT hr = m_pDevice->CreateRenderTargetView(pRenderTarget, nullptr, &pRenderTargetView);
@@ -3339,8 +3611,13 @@ HRESULT CDX11VideoProcessor::ConvertColorPass(ID3D11Texture2D* pRenderTarget)
 		m_pDeviceContext->PSSetShader(m_pPSConvertColor, nullptr, 0);
 	}
 	m_pDeviceContext->PSSetShaderResources(0, 1, &m_TexSrcVideo.pShaderResource.p);
-	m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexSrcVideo.pShaderResource2.p);
-	m_pDeviceContext->PSSetShaderResources(2, 1, &m_TexSrcVideo.pShaderResource3.p);
+	if (m_bMpvChromaActive) {
+		m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexMpvChromaOut[0].pShaderResource.p);
+		m_pDeviceContext->PSSetShaderResources(2, 1, &m_TexMpvChromaOut[1].pShaderResource.p);
+	} else {
+		m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexSrcVideo.pShaderResource2.p);
+		m_pDeviceContext->PSSetShaderResources(2, 1, &m_TexSrcVideo.pShaderResource3.p);
+	}
 	m_pDeviceContext->PSSetSamplers(0, 1, &m_pSamplerPoint.p);
 	m_pDeviceContext->PSSetSamplers(1, 1, &m_pSamplerLinear.p);
 	m_pDeviceContext->PSSetConstantBuffers(0, 1, &m_PSConvColorData.pConstants);
@@ -3903,11 +4180,23 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 	// DLSS Super Resolution in place of the resize shaders. ResizeShaderPass below
 	// is then left with rotating, flipping and placing the picture, and with any
 	// scale DLSS does not cover.
+	bool bEnlarged = false;
 	if (m_bDlssSRActive && bAllowDlss && pInputTexture) {
 		Tex2D_t* pSRResult = nullptr;
 		if (S_OK == DlssSRPass(pInputTexture, rSrc, dstRect, rotation, &pSRResult) && pSRResult) {
 			pInputTexture = pSRResult;
 			rSrc.SetRect(0, 0, pSRResult->desc.Width, pSRResult->desc.Height);
+			bEnlarged = true;
+		}
+	}
+
+	// An mpv prescaler chosen as the Upscaling method, where DLSS SR has not
+	// enlarged the picture; ResizeShaderPass then finishes the scale, as above.
+	if (!bEnlarged && m_MpvLuma.IsLoaded() && pInputTexture) {
+		Tex2D_t* pMpvResult = nullptr;
+		if (S_OK == MpvLumaPass(pInputTexture, rSrc, dstRect, rotation, &pMpvResult) && pMpvResult) {
+			pInputTexture = pMpvResult;
+			rSrc.SetRect(0, 0, pMpvResult->desc.Width, pMpvResult->desc.Height);
 		}
 	}
 
@@ -4567,6 +4856,7 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 
 	if (config.iChromaScaling != m_iChromaScaling) {
 		m_iChromaScaling = config.iChromaScaling;
+		m_bMpvChromaFailed = false;
 		changeConvertShader = m_PSConvColorData.bEnable && (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422);
 	}
 
@@ -4940,6 +5230,11 @@ void CDX11VideoProcessor::UpdateStatsStatic()
 		m_strStatsVProc.assign(L"\nVideoProcessor: ");
 		if (m_D3D11VP.IsReady()) {
 			m_strStatsVProc += std::format(L"D3D11 VP, output to {}", DXGIFormatToString(m_D3D11OutputFmt));
+			// It converts the picture itself, so the chroma upsampling is its own and
+			// the Chroma upsampling list has nothing to do here.
+			if (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422) {
+				m_strStatsVProc.append(L", converts chroma");
+			}
 		} else {
 			m_strStatsVProc.append(L"Shaders");
 			if (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422) {
@@ -4953,6 +5248,9 @@ void CDX11VideoProcessor::UpdateStatsStatic()
 					break;
 				case CHROMA_CatmullRom:
 					m_strStatsVProc.append(L"Catmull-Rom");
+					break;
+				case CHROMA_RAVU:
+					m_strStatsVProc.append(m_bMpvChromaActive ? L"RAVU-zoom" : L"Catmull-Rom");
 					break;
 				}
 			}
@@ -5207,16 +5505,29 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		m_RenderStats.t6 * 1000 / GetPreciseTicksPerSecond());
 #endif
 
+	std::wstring times;
+	const auto AddTime = [&](const wchar_t* name, double ms) {
+		if (ms >= 0) {
+			times += std::format(L"{}{} {:.1f}", times.empty() ? L"" : L", ", name, ms);
+		}
+	};
+
+	// The mpv prescalers' GPU time, while they run.
+	if (m_MpvLuma.IsLoaded()) {
+		AddTime(m_MpvLuma.Info()->name, m_DlssStageTimes.MeanMs(CGpuStageTimes::MpvLuma));
+	}
+	if (m_bMpvChromaActive && !m_D3D11VP.IsReady()) {
+		AddTime(L"RAVU-zoom chroma", m_DlssStageTimes.MeanMs(CGpuStageTimes::MpvChroma));
+	}
+	if (!times.empty()) {
+		str += L"\nPrescale (ms) : " + times;
+		times.clear();
+	}
+
 	if (m_bDlssNRActive || m_bDlssSRActive) {
 		// Where the DLSS time goes: DLSS 5 NR as the renderer waits for it, the
 		// other stages on the GPU. Optical Flow shows under the stabilizer when
 		// it serves DLSS 5 NR, as OF when DLSS SR runs its own.
-		std::wstring times;
-		const auto AddTime = [&](const wchar_t* name, double ms) {
-			if (ms >= 0) {
-				times += std::format(L"{}{} {:.1f}", times.empty() ? L"" : L", ", name, ms);
-			}
-		};
 		if (m_bDlssNRActive) {
 			AddTime(L"NR", m_DlssNRTimes.Mean());
 			const double motion = m_DlssStageTimes.MeanMs(CGpuStageTimes::NRMotion);
@@ -5230,7 +5541,9 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		if (!times.empty()) {
 			str += L"\nDLSS (ms)     : " + times;
 		}
+	}
 
+	if (m_bDlssNRActive || m_bDlssSRActive || m_MpvLuma.IsLoaded()) {
 		if (!m_bDlssRenderAhead) {
 			str.append(L"\nRender ahead  : off");
 		} else if (m_RenderAhead.MeanLatencyMs() >= 0) {
@@ -5251,10 +5564,8 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 
 	const std::wstring str = GetStatsText();
 
-	// The DLSS lines can take the text past the box it was sized for.
-	const int lines = 1 + (int)std::count(str.begin(), str.end(), L'\n');
-	if (lines > m_iStatsLines) {
-		m_iStatsLines = lines;
+	// The DLSS and prescaler lines come and go: the box is made to fit them.
+	if (UpdateStatsLayout(str)) {
 		CalcStatsParams();
 	}
 
@@ -5266,11 +5577,13 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 		m_StatsBackground.Draw(pRenderTargetView, rtSize);
 
 		hr = m_Font3D.Draw2DText(pRenderTargetView, rtSize, m_StatsTextPoint.x, m_StatsTextPoint.y, m_dwStatsTextColor, str.c_str());
-		static int col = m_StatsRect.right;
-		if (--col < m_StatsRect.left) {
-			col = m_StatsRect.right;
+		// The marker scrolls along the bottom of the box, and starts over when the box
+		// has moved under it.
+		if (--m_StatsMarkerX < m_StatsRect.left || m_StatsMarkerX > m_StatsRect.right) {
+			m_StatsMarkerX = m_StatsRect.right;
 		}
-		m_Rect3D.Set({ col, m_StatsRect.bottom - 11, col + 5, m_StatsRect.bottom - 1 }, rtSize, D3DCOLOR_XRGB(128, 255, 128));
+		m_Rect3D.Set({ m_StatsMarkerX, m_StatsRect.bottom - kStatsMarkerH - 1, m_StatsMarkerX + 5, m_StatsRect.bottom - 1 },
+			rtSize, D3DCOLOR_XRGB(128, 255, 128));
 		m_Rect3D.Draw(pRenderTargetView, rtSize);
 
 

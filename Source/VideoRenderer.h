@@ -274,6 +274,7 @@ public:
 	// IVideoRenderer
 	STDMETHODIMP GetVideoProcessorInfo(std::wstring& str);
 	STDMETHODIMP_(bool) GetActive();
+	STDMETHODIMP_(unsigned) GetVideoProcessorUse();
 
 	STDMETHODIMP_(void) GetSettings(Settings_t& setings);
 	STDMETHODIMP_(void) SetSettings(const Settings_t& setings);

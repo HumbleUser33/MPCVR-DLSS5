@@ -125,7 +125,6 @@ void CVRDlssPPage::SetControls()
 	Combo_SelectByItemData(m_hWnd, IDC_COMBO15, m_SetsPP.iDlssSRPreset);
 	SetDlgItemTextW(IDC_EDIT9, m_SetsPP.szDlssSRDllPath);
 
-	CheckDlgButton(IDC_CHECK26, m_SetsPP.bDlssRenderAhead ? BST_CHECKED : BST_UNCHECKED);
 }
 
 void CVRDlssPPage::EnableControls()
@@ -158,9 +157,6 @@ void CVRDlssPPage::EnableControls()
 	for (const int id : { IDC_STATIC36, IDC_COMBO15 }) {
 		GetDlgItem(id).EnableWindow(bD3D11 && m_SetsPP.bDlssSR);
 	}
-
-	// Serves both passes, so it stays live whichever of them is on.
-	GetDlgItem(IDC_CHECK26).EnableWindow(bD3D11);
 }
 
 HRESULT CVRDlssPPage::OnConnect(IUnknown* pUnk)
@@ -313,19 +309,35 @@ HRESULT CVRDlssPPage::OnActivate()
 		L"Path to nvngx_dlss.dll, or its folder; the file must keep that name.\n"
 		"Leave empty to look next to the filter, then one and two\n"
 		"directories up.");
-	AddHint(IDC_CHECK26,
-		L"The renderer starts a picture 8 ms before its time, so whatever DLSS\n"
-		"takes beyond that shows the picture late, and late by a varying amount.\n"
-		"This starts each picture earlier by the time DLSS 5 NR and DLSS SR\n"
-		"take, measured until the GPU is done with it, then holds it until its\n"
-		"time: the video stays on the audio clock. Used only while one of them\n"
-		"runs; the statistics show it as Render ahead.");
+
+	// Everything here needs Direct3D 11, which is the other page's checkbox; the frame
+	// says nothing when it is applied there.
+	SetTimer(kRefreshTimer, 500);
+
+	return S_OK;
+}
+
+HRESULT CVRDlssPPage::OnDeactivate()
+{
+	KillTimer(kRefreshTimer);
 
 	return S_OK;
 }
 
 INT_PTR CVRDlssPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	if (uMsg == WM_TIMER && wParam == kRefreshTimer && m_pVideoRenderer) {
+		Settings_t current;
+		m_pVideoRenderer->GetSettings(current);
+		if (current.bUseD3D11 != m_SetsPP.bUseD3D11) {
+			// Not an edit made here, so the page's own reference moves with it and
+			// applying this page never writes it back.
+			m_SetsPP.bUseD3D11 = current.bUseD3D11;
+			m_SetsOpened.bUseD3D11 = current.bUseD3D11;
+			EnableControls();
+		}
+	}
+
 	if (uMsg == WM_COMMAND) {
 		const int nID = LOWORD(wParam);
 		const int action = HIWORD(wParam);
@@ -338,7 +350,6 @@ INT_PTR CVRDlssPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				{ IDC_CHECK23, &m_SetsPP.bDlssNRAfterUpscale,  false },
 				{ IDC_CHECK24, &m_SetsPP.bDlssNRMotionVectors, false },
 				{ IDC_CHECK25, &m_SetsPP.bDlssSR,              true  },
-				{ IDC_CHECK26, &m_SetsPP.bDlssRenderAhead,     false },
 			};
 			for (const auto& c : checks) {
 				if (nID == c.id) {
@@ -485,7 +496,6 @@ HRESULT CVRDlssPPage::OnApplyChanges()
 	TAKE_IF_CHANGED(iDlssNRToggleKey)
 	TAKE_IF_CHANGED(bDlssSR)
 	TAKE_IF_CHANGED(iDlssSRPreset)
-	TAKE_IF_CHANGED(bDlssRenderAhead)
 #undef TAKE_IF_CHANGED
 	if (wcscmp(m_SetsPP.szDlssNRDllPath, m_SetsOpened.szDlssNRDllPath)) {
 		wcscpy_s(current.szDlssNRDllPath, m_SetsPP.szDlssNRDllPath);

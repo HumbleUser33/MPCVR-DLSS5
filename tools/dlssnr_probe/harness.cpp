@@ -999,7 +999,10 @@ static int RunOracle(ID3D11Device* dev, ID3D11DeviceContext* ctx, CDlssNR& dlss,
 #include "effect_suite.inl"
 #include "flow_suite.inl"
 #include "stab_suite.inl"
+#include "mpvhook.inl"
 #include "upscale_suite.inl"
+#include "chroma_suite.inl"
+#include "mpv_port_suite.inl"
 #include "sr_suite.inl"
 #include "pipeline_suite.inl"
 
@@ -1080,6 +1083,8 @@ int wmain(int argc, wchar_t** argv)
 	const bool temporalStabBench = hasArg(L"--tstabbench");
 	const bool temporalUpscale = hasArg(L"--tupscale");
 	const bool temporalUpscaleCost = hasArg(L"--tupscalecost");
+	const bool temporalChroma = hasArg(L"--tchroma");
+	const bool temporalMpvPort = hasArg(L"--tmpvport");
 	const bool temporalSR = hasArg(L"--tsr");
 	const bool temporalSRQuality = hasArg(L"--tsrq");
 	const bool temporalPipeline = hasArg(L"--tpipeline");
@@ -1096,7 +1101,7 @@ int wmain(int argc, wchar_t** argv)
 		}
 	}
 	if (temporal || temporalOracle || temporalDetect || temporalBench || temporalPort || temporalEffect || temporalFlow
-			|| temporalStab || temporalStabPort || temporalStabBench || temporalUpscale || temporalUpscaleCost || temporalSR || temporalSRQuality || temporalPipeline) {
+			|| temporalStab || temporalStabPort || temporalStabBench || temporalUpscale || temporalUpscaleCost || temporalChroma || temporalMpvPort || temporalSR || temporalSRQuality || temporalPipeline) {
 		int srRefs = 0;   // --srrefs N: only the first N references
 		for (int i = 1; i + 1 < argc; i++) {
 			if (!wcscmp(argv[i], L"--srrefs")) {
@@ -1107,7 +1112,10 @@ int wmain(int argc, wchar_t** argv)
 			: temporalSRQuality ? temporal::RunSRQuality(dev, ctx, srDllPath.c_str(), srRefs)
 			: temporalSR ? temporal::RunSR(dev, ctx, dlss, srDllPath.c_str())
 			: temporalUpscaleCost ? temporal::RunUpscaleCost(dev, ctx)
-			: temporalUpscale ? temporal::RunUpscale(dev, ctx)
+			: temporalMpvPort ? temporal::RunMpvPort(dev, ctx, srRefs)
+			: temporalMpvPort ? temporal::RunMpvPort(dev, ctx, srRefs)
+			: temporalChroma ? temporal::RunChroma(dev, ctx, srRefs)
+			: temporalUpscale ? temporal::RunUpscale(dev, ctx, srRefs, hasArg(L"--nomodels"))
 			: temporalStabBench ? temporal::RunStabBench(dev, ctx)
 			: (temporalStab || temporalStabPort)
 			? temporal::RunStab(dev, ctx, dlss, temporalImage.c_str(), temporalFrames, temporalStrong, temporalStabPort)

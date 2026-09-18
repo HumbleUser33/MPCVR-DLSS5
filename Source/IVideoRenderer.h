@@ -48,6 +48,7 @@ enum :int {
 	CHROMA_Nearest = 0,
 	CHROMA_Bilinear,
 	CHROMA_CatmullRom,
+	CHROMA_RAVU,       // RAVU-zoom (mpv) on Cb and Cr: Direct3D 11 shaders, 4:2:0; Catmull-Rom elsewhere
 	CHROMA_COUNT
 };
 
@@ -58,6 +59,11 @@ enum :int {
 	UPSCALE_Lanczos2,
 	UPSCALE_Lanczos3,
 	UPSCALE_Jinc2,
+	// mpv prescalers on luma, colour from Catmull-Rom: Direct3D 11 at feature level
+	// 11.0; Catmull-Rom elsewhere and for what they leave to scale.
+	UPSCALE_FSRCNNX8,
+	UPSCALE_FSRCNNX16,
+	UPSCALE_RAVUZoom,
 	UPSCALE_COUNT
 };
 
@@ -221,8 +227,8 @@ struct Settings_t {
 		bVPScaling                      = true;
 		iVPSuperRes                     = SUPERRES_Disable;
 		bVPRTXVideoHDR                  = false;
-		iChromaScaling                  = CHROMA_Bilinear;
-		iUpscaling                      = UPSCALE_CatmullRom;
+		iChromaScaling                  = CHROMA_CatmullRom;
+		iUpscaling                      = UPSCALE_Jinc2;
 		iDownscaling                    = DOWNSCALE_Hamming;
 		bInterpolateAt50pct             = true;
 		bUseDither                      = true;
@@ -296,13 +302,24 @@ inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 	dst.bDlssSR               = src.bDlssSR;
 	dst.iDlssSRPreset         = src.iDlssSRPreset;
 	wcscpy_s(dst.szDlssSRDllPath, src.szDlssSRDllPath);
-	dst.bDlssRenderAhead      = src.bDlssRenderAhead;
+	// bDlssRenderAhead is not here: it belongs to the main page, which sets it for
+	// the prescalers as much as for DLSS.
 }
+
+// What the hardware video processor is doing with the picture being played, which
+// decides whether the shader lists have anything to do: it converts the formats it
+// was given, chroma upsampling included, and resizes when it was told to and no DLSS
+// pass has taken the resizing back from it.
+enum :unsigned {
+	VPUSE_Converting = 1,
+	VPUSE_Resizing   = 2,
+};
 
 interface __declspec(uuid("1AB00F10-5F55-42AC-B53F-38649F11BE3E"))
 IVideoRenderer : public IUnknown {
 	STDMETHOD(GetVideoProcessorInfo) (std::wstring& str) PURE;
 	STDMETHOD_(bool, GetActive()) PURE;
+	STDMETHOD_(unsigned, GetVideoProcessorUse()) PURE;
 
 	STDMETHOD_(void, GetSettings(Settings_t& setings)) PURE;
 	STDMETHOD_(void, SetSettings(const Settings_t& setings)) PURE;

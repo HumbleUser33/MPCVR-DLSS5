@@ -28,6 +28,10 @@ class __declspec(uuid("DA46D181-07D6-441D-B314-019AEB10148A"))
 	CVRMainPPage : public CBasePropertyPage, public CWindow
 {
 	CComQIPtr<IVideoRenderer> m_pVideoRenderer;
+	// What the renderer is doing right now, watched by the timer: it decides part of
+	// the greying, and nothing else tells the page when it changes.
+	unsigned m_uVPUse = 0;
+	bool m_bRendererActive = false;
 
 	Settings_t m_SetsPP;
 
@@ -46,6 +50,7 @@ private:
 	HRESULT OnConnect(IUnknown* pUnknown) override;
 	HRESULT OnDisconnect() override;
 	HRESULT OnActivate() override;
+	HRESULT OnDeactivate() override;
 	void SetDirty()
 	{
 		m_bDirty = TRUE;
@@ -55,6 +60,9 @@ private:
 	}
 	INT_PTR OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) override;
 	HRESULT OnApplyChanges() override;
+	// The other page's settings are only seen again by asking the renderer: the frame
+	// tells a page nothing when another one applies (see the timer in OnReceiveMessage).
+	static constexpr UINT_PTR kRefreshTimer = 1;
 
 	HWND CreateHintWindow(HWND parent, int timePop = 1700, int timeInit = 70, int timeReshow = 7);
 	void AddHint(int id, const LPCWSTR text);

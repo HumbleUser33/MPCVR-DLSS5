@@ -53,8 +53,8 @@ protected:
 	int  m_iVPDeinterlacing                = DEINT_Enable;
 	bool m_bDeintDouble                    = true;
 	bool m_bVPScaling                      = true;
-	int  m_iChromaScaling                  = CHROMA_Bilinear;
-	int  m_iUpscaling                      = UPSCALE_CatmullRom; // interpolation
+	int  m_iChromaScaling                  = CHROMA_CatmullRom;
+	int  m_iUpscaling                      = UPSCALE_Jinc2;      // interpolation
 	int  m_iDownscaling                    = DOWNSCALE_Hamming;  // convolution
 	bool m_bInterpolateAt50pct             = true;
 	bool m_bUseDither                      = true;
@@ -149,6 +149,14 @@ protected:
 	int m_StatsFontH = 14;
 	RECT m_StatsRect = { 10, 10, 10 + 5 + 63*8 + 3, 10 + 5 + 18*17 + 3 };
 	const POINT m_StatsTextPoint = { 10 + 5, 10 + 5};
+	// The box follows the text: DLSS and the prescalers add and drop lines as they run.
+	static constexpr int kStatsMinColumns = 61;
+	static constexpr int kStatsMaxColumns = 100; // beyond that the box would take the graph's place
+	static constexpr int kStatsMarkerH = 10;     // the green block scrolling along the bottom
+	int m_StatsLines = 20;
+	int m_StatsColumns = kStatsMinColumns;
+	int m_StatsShrinkCount = 0; // a smaller text only counts once it holds
+	int m_StatsMarkerX = 0;
 
 	// Graph of a function
 	CMovingAverage<int> m_Syncs = CMovingAverage<int>(120);
@@ -234,12 +242,19 @@ public:
 	virtual HRESULT GetCurentImage(long *pDIBImage) = 0;
 	virtual HRESULT GetDisplayedImage(BYTE **ppDib, unsigned *pSize) = 0;
 	virtual HRESULT GetVPInfo(std::wstring& str) = 0;
+	// VPUSE_*: what the hardware video processor is doing with the picture at hand,
+	// for the property page to grey what it leaves nothing to do.
+	virtual unsigned GetVideoProcessorUse() = 0;
 
 	void UpdateStatsByWindow();
 	void UpdateStatsByDisplay();
 	bool CheckGraphPlacement();
 	void CalcGraphParams();
 	virtual void CalcStatsParams() = 0;
+	// The lines and columns this text needs. True when the box has to be made again:
+	// it grows at once, and only shrinks once the shorter text has held, so a line
+	// that comes and goes does not rebuild the box on every picture.
+	bool UpdateStatsLayout(const std::wstring& text);
 
 	void SetDisplayInfo(const DisplayConfig_t& dc, const bool primary, const bool exclusiveScreen);
 
