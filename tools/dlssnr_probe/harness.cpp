@@ -1004,6 +1004,7 @@ static int RunOracle(ID3D11Device* dev, ID3D11DeviceContext* ctx, CDlssNR& dlss,
 #include "chroma_suite.inl"
 #include "mpv_port_suite.inl"
 #include "sr_suite.inl"
+#include "sr_still_suite.inl"
 #include "pipeline_suite.inl"
 
 int wmain(int argc, wchar_t** argv)
@@ -1087,6 +1088,8 @@ int wmain(int argc, wchar_t** argv)
 	const bool temporalMpvPort = hasArg(L"--tmpvport");
 	const bool temporalSR = hasArg(L"--tsr");
 	const bool temporalSRQuality = hasArg(L"--tsrq");
+	const bool temporalSRStill = hasArg(L"--tsrstill");
+	const bool temporalSRPort = hasArg(L"--tsrport");
 	const bool temporalPipeline = hasArg(L"--tpipeline");
 	std::wstring srDllPath;   // empty: CDlssSR looks next to the harness, then up to the repository root
 	for (int i = 1; i + 1 < argc; i++) {
@@ -1101,7 +1104,7 @@ int wmain(int argc, wchar_t** argv)
 		}
 	}
 	if (temporal || temporalOracle || temporalDetect || temporalBench || temporalPort || temporalEffect || temporalFlow
-			|| temporalStab || temporalStabPort || temporalStabBench || temporalUpscale || temporalUpscaleCost || temporalChroma || temporalMpvPort || temporalSR || temporalSRQuality || temporalPipeline) {
+			|| temporalStab || temporalStabPort || temporalStabBench || temporalUpscale || temporalUpscaleCost || temporalChroma || temporalMpvPort || temporalSR || temporalSRQuality || temporalSRStill || temporalSRPort || temporalPipeline) {
 		int srRefs = 0;   // --srrefs N: only the first N references
 		for (int i = 1; i + 1 < argc; i++) {
 			if (!wcscmp(argv[i], L"--srrefs")) {
@@ -1109,6 +1112,8 @@ int wmain(int argc, wchar_t** argv)
 			}
 		}
 		const int rc = temporalPipeline ? temporal::RunPipeline(dev, ctx, dlss, srDllPath.c_str(), temporalFrames)
+			: temporalSRPort ? temporal::RunSRPort(dev, ctx, srRefs)
+			: temporalSRStill ? temporal::RunSRStill(dev, ctx, srDllPath.c_str(), srRefs)
 			: temporalSRQuality ? temporal::RunSRQuality(dev, ctx, srDllPath.c_str(), srRefs)
 			: temporalSR ? temporal::RunSR(dev, ctx, dlss, srDllPath.c_str())
 			: temporalUpscaleCost ? temporal::RunUpscaleCost(dev, ctx)

@@ -71,3 +71,17 @@ HRESULT GetShaderConvertColor(
 	const int convertType,
 	const bool blendDeinterlace,
 	ID3DBlob** ppCode);
+
+// A compute shader that rebuilds the chroma the same way and writes the picture as
+// packed 4:4:4 -- AYUV for an 8-bit source, Y410 above -- so that the D3D11 video
+// processor, which reads it next, has no chroma of its own to rebuild. The picture
+// stays in Y'CbCr, brought to the scale the processor reads studio range on, and the
+// conversion to RGB is still its own.
+HRESULT GetShaderConvertTo444(
+	const UINT width,
+	const long texW, const long texH,
+	const FmtConvParams_t& fmtParams,
+	const DXVA2_ExtendedFormat exFmt,
+	const int chromaScaling,
+	const DXGI_FORMAT packedFormat,
+	ID3DBlob** ppCode);

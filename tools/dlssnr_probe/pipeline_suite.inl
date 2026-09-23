@@ -143,7 +143,7 @@ static int RunPipeline(ID3D11Device* dev, ID3D11DeviceContext* ctx, CDlssNR& dls
 			bool sr;
 		};
 		const Config configs[] = {
-			{ "DLSS 5 NR + stabilizer + DLSS SR (vectors lent)", true,  true  },
+			{ "DLSS 5 NR + stabilizer + DLSS SR",                 true,  true  },
 			{ "DLSS SR alone (its own Optical Flow)",            false, true  },
 			{ "DLSS 5 NR + stabilizer + Catmull-Rom",            true,  false },
 			{ "Catmull-Rom alone",                               false, false },
@@ -184,12 +184,11 @@ static int RunPipeline(ID3D11Device* dev, ID3D11DeviceContext* ctx, CDlssNR& dls
 			if (ok && !config.nr) {
 				ok = SUCCEEDED(plainIn.Create(dev, DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, Tex2D_DefaultShaderRTarget));
 			}
-			if (ok && config.sr && !config.nr) {
-				CDlssStabilizer::FlowSettings settings;
-				settings.bidirectional = false;
-				settings.cost = false;
+			if (ok && config.sr) {
+				// DLSS SR's own vectors, as DlssSRPass makes them, NR or not.
 				ok = SUCCEEDED(flow.Create(dev, ctx, W, H, CDlssStabilizer::Motion::OpticalFlow,
-					stabPasses.InputLayout(), stabPasses.VertexShader(), stabPasses.SamplerPoint(), stabPasses.SamplerLinear(), true, settings));
+					stabPasses.InputLayout(), stabPasses.VertexShader(), stabPasses.SamplerPoint(), stabPasses.SamplerLinear(),
+					true, CDlssStabilizer::ForDlssSR()));
 			}
 			if (ok && config.sr) {
 				sr.RequestReset();
@@ -236,13 +235,8 @@ static int RunPipeline(ID3D11Device* dev, ID3D11DeviceContext* ctx, CDlssNR& dls
 				// DLSS Super Resolution, or the resize shaders.
 				if (config.sr) {
 					ctx->CopyResource(sr.GetInput()->pTexture, pCurrent->pTexture);
-					ID3D11Texture2D* pMotion = nullptr;
-					if (config.nr) {
-						pMotion = stabilizer.GetMotionVectors();
-					} else {
-						flow.PrepareMotion(ctx, sr.GetInput()->pShaderResource);
-						pMotion = flow.GetMotionVectors();
-					}
+					flow.PrepareMotion(ctx, sr.GetInput()->pShaderResource);
+					ID3D11Texture2D* pMotion = flow.GetMotionVectors();
 					if (!sr.Evaluate(pMotion, 41.7f)) {
 						ok = false;
 						break;

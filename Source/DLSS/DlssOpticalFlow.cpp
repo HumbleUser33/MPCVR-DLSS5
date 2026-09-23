@@ -254,6 +254,7 @@ bool CDlssOpticalFlow::Init(ID3D11Device* pDevice, ID3D11DeviceContext* pContext
 	m_outHeight      = (height + grid - 1) / grid;
 	m_bBidirectional = bidirectional;
 	m_bCost          = options.cost;
+	m_bTemporalHints = options.temporalHints;
 
 	bool ok = CreateBuffer(pDevice, width, height, DXGI_FORMAT_R8_UNORM, true, m_frames[0])
 		&& CreateBuffer(pDevice, width, height, DXGI_FORMAT_R8_UNORM, true, m_frames[1])
@@ -297,6 +298,7 @@ void CDlssOpticalFlow::Release()
 	m_outWidth = m_outHeight = 0;
 	m_bBidirectional = false;
 	m_bCost = false;
+	m_bTemporalHints = true;
 	m_current = 0;
 	m_iFramesWritten = 0;
 	m_bResetHints = true;
@@ -323,7 +325,7 @@ bool CDlssOpticalFlow::Execute()
 	NV_OF_EXECUTE_INPUT_PARAMS in = {};
 	in.inputFrame           = m_frames[current].hBuffer;
 	in.referenceFrame       = m_frames[previous].hBuffer;
-	in.disableTemporalHints = m_bResetHints ? NV_OF_TRUE : NV_OF_FALSE;
+	in.disableTemporalHints = (m_bResetHints || !m_bTemporalHints) ? NV_OF_TRUE : NV_OF_FALSE;
 
 	NV_OF_EXECUTE_OUTPUT_PARAMS out = {};
 	out.outputBuffer        = m_fwdFlow.hBuffer;

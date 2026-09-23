@@ -95,6 +95,9 @@
 #define IDF_PS_11_DLSS_STAB_FLOWFRAME   894
 #define IDF_PS_11_DLSS_STAB_FLOWMOTION  895
 #define IDF_PS_11_DLSS_STAB_STABILIZE   896
+#define IDF_PS_11_DLSS_STAB_SNAPMOTION  897
+#define IDF_CS_11_DLSS_GLOBAL_MOTION    898
+#define IDF_PS_11_DLSS_STAB_BLOCKMOTION 899
 #define IDF_PS_11_TEST                  900
 #define IDF_VS_11_MPV_HOOK              950
 #define IDF_PS_11_MPV_LUMA              951
@@ -194,6 +197,7 @@
 #define IDC_CHECK26                     1116
 #define IDC_STATIC40                    1117
 #define IDC_STATIC41                    1118
+#define IDC_CHECK27                     1119
 
 // Next default values for new objects
 // 
@@ -201,7 +205,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        108
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1119
+#define _APS_NEXT_CONTROL_VALUE         1120
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

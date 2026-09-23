@@ -48,6 +48,7 @@
 #define OPT_VPScaling                      L"VPScaling"
 #define OPT_VPSuperResolution              L"VPSuperResolution"
 #define OPT_VPRTXVideoHDR                  L"VPRTXVideoHDR"
+#define OPT_VPReplaceChroma                L"VPReplaceChroma"
 #define OPT_ChromaUpsampling               L"ChromaUpsampling"
 #define OPT_Upscaling                      L"Upscaling"
 #define OPT_Downscaling                    L"Downscaling"
@@ -237,6 +238,9 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 			m_Sets.bVPRTXVideoHDR = !!dw;
 		}
 #endif
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_VPReplaceChroma, dw)) {
+			m_Sets.bVPReplaceChroma = !!dw;
+		}
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_ChromaUpsampling, dw)) {
 			m_Sets.iChromaScaling = discard<int>(dw, CHROMA_CatmullRom, 0, CHROMA_COUNT-1);
 		}
@@ -1489,6 +1493,7 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 #ifdef _WIN64
 		key.SetDWORDValue(OPT_VPRTXVideoHDR,       m_Sets.bVPRTXVideoHDR);
 #endif
+		key.SetDWORDValue(OPT_VPReplaceChroma,     m_Sets.bVPReplaceChroma);
 		key.SetDWORDValue(OPT_ChromaUpsampling,    m_Sets.iChromaScaling);
 		key.SetDWORDValue(OPT_Upscaling,           m_Sets.iUpscaling);
 		key.SetDWORDValue(OPT_Downscaling,         m_Sets.iDownscaling);

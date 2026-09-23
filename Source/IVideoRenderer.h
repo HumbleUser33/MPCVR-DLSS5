@@ -150,6 +150,14 @@ struct Settings_t {
 	bool bVPScaling;
 	int iVPSuperRes;
 	bool bVPRTXVideoHDR;
+	// The video processor's own chroma upsampling measures about bilinear, and on a
+	// 10-bit source the driver reads the studio range as 16/255..235/255 whatever the
+	// depth, which shifts the colour by about one 8-bit level. With this, the shaders
+	// rebuild the chroma of a progressive 4:2:0 or 4:2:2 picture with iChromaScaling
+	// and hand the processor a 4:4:4 one, so it keeps the picture and RTX Video HDR
+	// goes on working. Interlaced video keeps the processor's own chroma: it is the
+	// only deinterlacer there is, and it deinterlaces 4:2:0 only. Direct3D 11 only.
+	bool bVPReplaceChroma;
 	int  iChromaScaling;
 	int  iUpscaling;
 	int  iDownscaling;
@@ -227,6 +235,7 @@ struct Settings_t {
 		bVPScaling                      = true;
 		iVPSuperRes                     = SUPERRES_Disable;
 		bVPRTXVideoHDR                  = false;
+		bVPReplaceChroma                = false;
 		iChromaScaling                  = CHROMA_CatmullRom;
 		iUpscaling                      = UPSCALE_Jinc2;
 		iDownscaling                    = DOWNSCALE_Hamming;

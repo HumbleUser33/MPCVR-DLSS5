@@ -43,6 +43,7 @@ public:
 		NV_OF_PERF_LEVEL perfLevel     = NV_OF_PERF_LEVEL_MEDIUM;
 		bool             bidirectional = true;                     // backward flow as well
 		bool             cost          = true;                     // matching cost per vector
+		bool             temporalHints = true;                     // start from the last picture's flow
 	};
 
 	CDlssOpticalFlow() = default;
@@ -88,6 +89,11 @@ public:
 	ID3D11ShaderResourceView* BackwardFlow() const { return m_bwdFlow.pShaderResource; }
 	ID3D11ShaderResourceView* ForwardCost() const { return m_fwdCost.pShaderResource; }
 	ID3D11ShaderResourceView* BackwardCost() const { return m_bwdCost.pShaderResource; }
+	// After a successful Execute: the frame it ran on, and the one before it.
+	ID3D11ShaderResourceView* CurrentFrame() const { return m_frames[1 - m_current].pShaderResource; }
+	ID3D11ShaderResourceView* PreviousFrame() const { return m_frames[m_current].pShaderResource; }
+	ID3D11Texture2D* CurrentFrameTexture() const { return m_frames[1 - m_current].pTexture; }
+	ID3D11Texture2D* PreviousFrameTexture() const { return m_frames[m_current].pTexture; }
 
 	const std::wstring& GetStatusLine() const { return m_status; }
 	UINT DriverApiVersion() const { return m_driverVersion; }   // major << 4 | minor
@@ -121,6 +127,7 @@ private:
 	UINT m_outWidth = 0, m_outHeight = 0;
 	bool m_bBidirectional = false;
 	bool m_bCost = false;
+	bool m_bTemporalHints = true;
 	int  m_current = 0;          // m_frames slot the next frame goes into
 	int  m_iFramesWritten = 0;
 	bool m_bResetHints = true;

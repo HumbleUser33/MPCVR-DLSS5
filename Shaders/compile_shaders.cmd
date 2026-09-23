@@ -116,6 +116,11 @@ SET fxc_ps4=%fxcexe% /nologo /O2 /T ps_4_0
 %fxc_ps4% /Fo "%workdir%\ps_dlss_stab_flowframe.cso"     "d3d11\ps_dlss_stabilize.hlsl" /DPASS=0
 %fxc_ps4% /Fo "%workdir%\ps_dlss_stab_flowmotion.cso"    "d3d11\ps_dlss_stabilize.hlsl" /DPASS=1
 %fxc_ps4% /Fo "%workdir%\ps_dlss_stab_stabilize.cso"     "d3d11\ps_dlss_stabilize.hlsl" /DPASS=2
+%fxc_ps4% /Fo "%workdir%\ps_dlss_stab_snapmotion.cso"    "d3d11\ps_dlss_stabilize.hlsl" /DPASS=3
+%fxc_ps4% /Fo "%workdir%\ps_dlss_stab_blockmotion.cso"   "d3d11\ps_dlss_stabilize.hlsl" /DPASS=4
+
+SET fxc_cs5=%fxcexe% /nologo /O2 /T cs_5_0
+%fxc_cs5% /Fo "%workdir%\cs_dlss_global_motion.cso"      "d3d11\cs_dlss_global_motion.hlsl"
 
 %fxc_ps4% /Fo "%workdir%\ps_mpv_luma.cso"                "d3d11\ps_mpv_prescale.hlsl" /DPASS=1
 %fxc_ps4% /Fo "%workdir%\ps_mpv_combine.cso"             "d3d11\ps_mpv_prescale.hlsl" /DPASS=2

@@ -28,8 +28,14 @@ class VideoTextureBuffer
 private:
 	std::vector<ID3D11Texture2D*> m_Textures;
 	std::vector<ID3D11VideoProcessorInputView*> m_InputViews;
+	// Set only when a shader writes the pictures: AYUV and Y410 have no render target
+	// view, so the chroma pass reaches them through an R32_UINT unordered access one.
+	std::vector<ID3D11UnorderedAccessView*> m_Uavs;
 
 	void ReleaseTextures() {
+		for (auto& uav : m_Uavs) {
+			SAFE_RELEASE(uav);
+		}
 		for (auto& inputview : m_InputViews) {
 			SAFE_RELEASE(inputview);
 		}
@@ -49,6 +55,7 @@ public:
 
 	void Clear() {
 		ReleaseTextures();
+		m_Uavs.clear();
 		m_InputViews.clear();
 		m_Textures.clear();
 	}
@@ -58,6 +65,7 @@ public:
 		if (len) {
 			m_Textures.resize(len);
 			m_InputViews.resize(len);
+			m_Uavs.resize(len);
 		}
 	}
 
@@ -67,15 +75,18 @@ public:
 		if (m_Textures.size() > 1) {
 			ID3D11Texture2D* pSurface = m_Textures.front();
 			ID3D11VideoProcessorInputView* pInputView = m_InputViews.front();
+			ID3D11UnorderedAccessView* pUav = m_Uavs.front();
 
 			for (size_t i = 1; i < m_Textures.size(); i++) {
 				auto pre = i - 1;
 				m_Textures[pre] = m_Textures[i];
 				m_InputViews[pre] = m_InputViews[i];
+				m_Uavs[pre] = m_Uavs[i];
 			}
 
 			m_Textures.back() = pSurface;
 			m_InputViews.back() = pInputView;
+			m_Uavs.back() = pUav;
 		}
 	}
 
@@ -95,6 +106,21 @@ public:
 		} else {
 			return nullptr;
 		}
+	}
+
+	ID3D11UnorderedAccessView** GetUav(UINT num)
+	{
+		if (num < m_Uavs.size()) {
+			return &m_Uavs[num];
+		} else {
+			return nullptr;
+		}
+	}
+
+	// The view of the texture GetTexture() hands out, for the pass that writes it.
+	ID3D11UnorderedAccessView* GetUav()
+	{
+		return m_Uavs.size() ? m_Uavs.back() : nullptr;
 	}
 
 	ID3D11VideoProcessorInputView** GetInputView(UINT num)
@@ -250,7 +276,11 @@ public:
 		DXGI_FORMAT& outputFmt);
 	void ReleaseVideoProcessor();
 
-	HRESULT InitInputTextures(ID3D11Device* pDevice);
+	// bShaderWritable: the pictures are written by the chroma pass, not copied in.
+	HRESULT InitInputTextures(ID3D11Device* pDevice, const bool bShaderWritable = false);
+
+	// The view of the texture GetNextInputTexture() just handed out.
+	ID3D11UnorderedAccessView* GetInputUav() { return m_VideoTextures.GetUav(); }
 
 	bool IsVideoDeviceOk() { return (m_pVideoDevice != nullptr); }
 	bool IsReady() { return (m_pVideoProcessor != nullptr); }

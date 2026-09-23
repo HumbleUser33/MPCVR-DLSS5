@@ -31,6 +31,7 @@ constexpr float kReprojection = 0.03f;   // input luma error where trust in a ve
 constexpr float kConsistency  = 1.0f;    // forward/backward mismatch, flow pixels, where trust starts to fall
 constexpr float kCostLow      = 48.0f;   // matching cost where trust starts to fall
 constexpr float kCostHigh     = 160.0f;  // and where it is gone
+constexpr float kTrustedShare = 0.05f;   // fewer trusted blocks than this share: no global motion (--tsrstill)
 
 // Optical Flow failing this many pictures in a row gives way to the detector.
 constexpr int kFlowFailuresBeforeFallback = 30;
@@ -48,6 +49,30 @@ UINT FlowFactor(UINT height)
 }
 
 } // namespace
+
+CDlssStabilizer::FlowSettings CDlssStabilizer::ForDlssSR()
+{
+	FlowSettings flow;
+	flow.bidirectional     = true;
+	flow.cost              = true;
+	flow.flowBlur          = 1;
+	flow.snap              = true;
+	flow.snapLow           = 0.75f;
+	flow.snapHigh          = 1.5f;
+	flow.snapGate          = 2;
+	flow.snapDeadZone      = 0.4f;
+	flow.vectorRadius      = 3;
+	flow.vectorSigma       = 1.0f;
+	flow.vectorShift       = 3;
+	flow.vectorSupportLow  = 0.1f;
+	flow.vectorSupportHigh = 0.3f;
+	flow.vectorEvidence    = 4.0f;
+	flow.vectorTemporal    = 0.3f;
+	flow.vectorRefine      = 3;
+	flow.vectorReach       = 4.0f;
+	flow.vectorTexture     = 0.02f;
+	return flow;
+}
 
 HRESULT CDlssStabilizer::CreateTarget(ID3D11Device* pDevice, UINT width, UINT height, DXGI_FORMAT format, Target& target)
 {
@@ -78,7 +103,7 @@ bool CDlssStabilizer::Matches(UINT width, UINT height, Motion motion, bool bMoti
 		&& m_FlowSettings == flow && m_pPSStabilize;
 }
 
-HRESULT CDlssStabilizer::CreateResources(ID3D11Device* pDevice, UINT width, UINT height, bool bMotionOnly)
+HRESULT CDlssStabilizer::CreateResources(ID3D11Device* pDevice, UINT width, UINT height, bool bMotionOnly, const FlowSettings& flow)
 {
 	HRESULT hr = S_OK;
 	const struct { UINT resid; ID3D11PixelShader** ppShader; } shaders[] = {
@@ -99,7 +124,7 @@ HRESULT CDlssStabilizer::CreateResources(ID3D11Device* pDevice, UINT width, UINT
 		}
 	}
 
-	D3D11_BUFFER_DESC bufferDesc = { 16 * sizeof(float), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
+	D3D11_BUFFER_DESC bufferDesc = { 32 * sizeof(float), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
 	hr = pDevice->CreateBuffer(&bufferDesc, nullptr, &m_pConstants);
 	if (SUCCEEDED(hr)) {
 		// FillVertices for an unrotated, unflipped blit of a whole texture: the
@@ -125,6 +150,46 @@ HRESULT CDlssStabilizer::CreateResources(ID3D11Device* pDevice, UINT width, UINT
 		hr = CreateTarget(pDevice, width, height, DXGI_FORMAT_R8_UNORM, m_Confidence);
 	}
 	if (bMotionOnly) {
+		if (SUCCEEDED(hr) && flow.snap) {
+			// The global motion, measured on the GPU and read there: nothing waits for it.
+			LPVOID data = nullptr;
+			DWORD size = 0;
+			hr = GetDataFromResource(data, size, IDF_CS_11_DLSS_GLOBAL_MOTION);
+			if (SUCCEEDED(hr)) {
+				hr = pDevice->CreateComputeShader(data, size, nullptr, &m_pCSGlobalMotion);
+			}
+			if (SUCCEEDED(hr)) {
+				hr = GetDataFromResource(data, size, IDF_PS_11_DLSS_STAB_SNAPMOTION);
+			}
+			if (SUCCEEDED(hr)) {
+				hr = pDevice->CreatePixelShader(data, size, nullptr, &m_pPSSnapMotion);
+			}
+			if (SUCCEEDED(hr)) {
+				hr = GetDataFromResource(data, size, IDF_PS_11_DLSS_STAB_BLOCKMOTION);
+			}
+			if (SUCCEEDED(hr)) {
+				hr = pDevice->CreatePixelShader(data, size, nullptr, &m_pPSBlockMotion);
+			}
+			if (SUCCEEDED(hr)) {
+				D3D11_TEXTURE2D_DESC desc = {};
+				desc.Width            = 1;
+				desc.Height           = 1;
+				desc.MipLevels        = 1;
+				desc.ArraySize        = 1;
+				desc.Format           = DXGI_FORMAT_R32G32B32A32_FLOAT;
+				desc.SampleDesc.Count = 1;
+				desc.Usage            = D3D11_USAGE_DEFAULT;
+				desc.BindFlags        = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+				hr = pDevice->CreateTexture2D(&desc, nullptr, &m_pGlobalMotion);
+			}
+			if (SUCCEEDED(hr)) {
+				hr = pDevice->CreateShaderResourceView(m_pGlobalMotion, nullptr, &m_pGlobalMotionView);
+			}
+			if (SUCCEEDED(hr)) {
+				hr = pDevice->CreateUnorderedAccessView(m_pGlobalMotion, nullptr, &m_pGlobalMotionTarget);
+			}
+			DLogIf(FAILED(hr), L"CDlssStabilizer::Create() : the global motion failed with error {}", HR2Str(hr));
+		}
 		return hr;
 	}
 	for (int i = 0; i < 2 && SUCCEEDED(hr); i++) {
@@ -168,7 +233,7 @@ HRESULT CDlssStabilizer::Create(ID3D11Device* pDevice, ID3D11DeviceContext* pCon
 		return E_INVALIDARG;
 	}
 
-	HRESULT hr = CreateResources(pDevice, width, height, bMotionOnly);
+	HRESULT hr = CreateResources(pDevice, width, height, bMotionOnly, flow);
 	if (FAILED(hr)) {
 		DLog(L"CDlssStabilizer::Create() : {}x{} failed with error {}", width, height, HR2Str(hr));
 		Release();
@@ -198,9 +263,22 @@ HRESULT CDlssStabilizer::Create(ID3D11Device* pDevice, ID3D11DeviceContext* pCon
 		options.perfLevel     = flow.perfLevel;
 		options.bidirectional = flow.bidirectional;
 		options.cost          = flow.cost;
+		options.temporalHints = flow.temporalHints;
 		if (!m_Flow.Init(pDevice, pContext, width / m_flowFactor, height / m_flowFactor, options)) {
 			fallback = m_Flow.GetStatusLine();
 			m_ActiveMotion = Motion::Detector;
+		} else if (m_pPSBlockMotion) {
+			// PASS 4's blocks, one pixel per vector, known once the engine has its grid.
+			for (int i = 0; i < 2 && SUCCEEDED(hr); i++) {
+				hr = CreateTarget(pDevice, m_Flow.OutputWidth(), m_Flow.OutputHeight(), DXGI_FORMAT_R32G32B32A32_FLOAT, m_BlockField[i]);
+			}
+			if (FAILED(hr)) {
+				Release();
+				m_failedWidth  = width;
+				m_failedHeight = height;
+				m_failedMotion = motion;
+				return hr;
+			}
 		}
 	}
 	if (m_ActiveMotion == Motion::Detector && !bMotionOnly) {
@@ -240,6 +318,16 @@ void CDlssStabilizer::Release()
 	m_pPSFlowFrame.Release();
 	m_pPSFlowMotion.Release();
 	m_pPSStabilize.Release();
+	m_pPSSnapMotion.Release();
+	m_pPSBlockMotion.Release();
+	m_BlockField[0] = Target{};
+	m_BlockField[1] = Target{};
+	m_iBlockField = 0;
+	m_bBlockHistory = false;
+	m_pCSGlobalMotion.Release();
+	m_pGlobalMotionTarget.Release();
+	m_pGlobalMotionView.Release();
+	m_pGlobalMotion.Release();
 	m_pConstants.Release();
 	m_pQuad.Release();
 	m_pMotionTarget.Release();
@@ -277,6 +365,7 @@ void CDlssStabilizer::Reset()
 	m_Flow.Reset();
 	m_Detector.Reset();
 	m_iFlowFailures = 0;
+	m_bBlockHistory = false;
 	m_bHistoryValid = false;
 	m_bHaveMotion   = false;
 	m_bHaveResult   = false;
@@ -294,12 +383,12 @@ void CDlssStabilizer::Draw(ID3D11DeviceContext* pContext, ID3D11PixelShader* pSh
 	ID3D11RenderTargetView* rtvs[2] = {};
 	const UINT numTargets = (UINT)std::min<size_t>(targets.size(), std::size(rtvs));
 	std::copy_n(targets.begin(), numTargets, rtvs);
-	ID3D11ShaderResourceView* srvs[6] = {};
+	ID3D11ShaderResourceView* srvs[8] = {};
 	std::copy_n(inputs.begin(), std::min<size_t>(inputs.size(), std::size(srvs)), srvs);
 
 	D3D11_MAPPED_SUBRESOURCE mr = {};
 	if (constants && count && SUCCEEDED(pContext->Map(m_pConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr))) {
-		float block[16] = {};
+		float block[32] = {};
 		std::copy_n(constants, std::min<size_t>(count, std::size(block)), block);
 		memcpy(mr.pData, block, sizeof(block));
 		pContext->Unmap(m_pConstants, 0);
@@ -326,10 +415,42 @@ void CDlssStabilizer::Draw(ID3D11DeviceContext* pContext, ID3D11PixelShader* pSh
 	pContext->Draw(4, 0);
 
 	// Unbound, so the next pass can write what this one read.
-	ID3D11ShaderResourceView* noViews[6] = {};
+	ID3D11ShaderResourceView* noViews[8] = {};
 	pContext->PSSetShaderResources(0, (UINT)std::size(noViews), noViews);
 	ID3D11RenderTargetView* noTargets[2] = {};
 	pContext->OMSetRenderTargets((UINT)std::size(noTargets), noTargets, nullptr);
+}
+
+void CDlssStabilizer::MeasureGlobalMotion(ID3D11DeviceContext* pContext)
+{
+	// Only the blocks PASS 1 would trust count, by the same measures.
+	D3D11_MAPPED_SUBRESOURCE mr = {};
+	if (SUCCEEDED(pContext->Map(m_pConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr))) {
+		const float constants[32] = {
+			(float)m_Flow.GridSize(), kConsistency, kCostLow, kCostHigh,
+			(float)m_Flow.Width(), (float)m_Flow.Height(), m_Flow.Bidirectional() ? 1.0f : 0.0f, m_Flow.HasCost() ? 1.0f : 0.0f,
+			kTrustedShare
+		};
+		memcpy(mr.pData, constants, sizeof(constants));
+		pContext->Unmap(m_pConstants, 0);
+	}
+	ID3D11ShaderResourceView* views[3] = { m_Flow.ForwardFlow(), m_Flow.BackwardFlow(), m_Flow.ForwardCost() };
+	ID3D11UnorderedAccessView* pTarget = m_pGlobalMotionTarget;
+	ID3D11Buffer* pConstants = m_pConstants;
+	pContext->CSSetShader(m_pCSGlobalMotion, nullptr, 0);
+	pContext->CSSetShaderResources(0, (UINT)std::size(views), views);
+	pContext->CSSetConstantBuffers(0, 1, &pConstants);
+	pContext->CSSetUnorderedAccessViews(0, 1, &pTarget, nullptr);
+	pContext->Dispatch(1, 1, 1);
+
+	// Unbound, so the next pass can read what this one wrote.
+	ID3D11ShaderResourceView* noViews[3] = {};
+	ID3D11UnorderedAccessView* noTarget = nullptr;
+	ID3D11Buffer* noConstants = nullptr;
+	pContext->CSSetShaderResources(0, (UINT)std::size(noViews), noViews);
+	pContext->CSSetUnorderedAccessViews(0, 1, &noTarget, nullptr);
+	pContext->CSSetConstantBuffers(0, 1, &noConstants);
+	pContext->CSSetShader(nullptr, nullptr, 0);
 }
 
 void CDlssStabilizer::PrepareMotion(ID3D11DeviceContext* pContext, ID3D11ShaderResourceView* pInput)
@@ -339,11 +460,38 @@ void CDlssStabilizer::PrepareMotion(ID3D11DeviceContext* pContext, ID3D11ShaderR
 	}
 
 	if (m_ActiveMotion == Motion::OpticalFlow) {
-		const float frameConstants[4] = { (float)m_flowFactor, 0, 0, 0 };
+		const float frameConstants[4] = { (float)m_flowFactor, (float)m_FlowSettings.flowBlur, 0, 0 };
 		Draw(pContext, m_pPSFlowFrame, { m_Flow.FrameTarget() }, m_Flow.Width(), m_Flow.Height(),
 			{ pInput }, frameConstants, std::size(frameConstants));
 
 		m_bHaveMotion = m_Flow.Execute();
+		if (m_bHaveMotion && m_bMotionOnly && m_pPSSnapMotion && m_BlockField[0].pTexture) {
+			// DLSS Super Resolution: the global motion, the blocks drawn to it and
+			// steadied (PASS 4), then blended into the working size (PASS 3).
+			m_iFlowFailures = 0;
+			MeasureGlobalMotion(pContext);
+			const float scaleX = (float)m_width / m_Flow.Width(), scaleY = (float)m_height / m_Flow.Height();
+			const int write = 1 - m_iBlockField;
+			const float blockConstants[28] = {
+				scaleX, scaleY, (float)m_Flow.GridSize(), kConsistency,
+				(float)m_Flow.Width(), (float)m_Flow.Height(), kCostLow, kCostHigh,
+				m_Flow.Bidirectional() ? 1.0f : 0.0f, m_Flow.HasCost() ? 1.0f : 0.0f, m_FlowSettings.snapLow, m_FlowSettings.snapHigh,
+				(float)m_FlowSettings.snapGate, m_FlowSettings.snapDeadZone, (float)m_FlowSettings.vectorRadius, m_FlowSettings.vectorSigma,
+				m_FlowSettings.vectorTemporal, m_bBlockHistory ? 1.0f : 0.0f, (float)m_FlowSettings.vectorShift, m_FlowSettings.vectorSupportLow,
+				m_FlowSettings.vectorSupportHigh, (float)m_FlowSettings.vectorRefine, m_FlowSettings.vectorReach, m_FlowSettings.vectorTexture,
+				m_FlowSettings.vectorEvidence, 0, 0, 0
+			};
+			Draw(pContext, m_pPSBlockMotion, { m_BlockField[write].pRenderTarget }, m_Flow.OutputWidth(), m_Flow.OutputHeight(),
+				{ m_Flow.ForwardFlow(), m_Flow.BackwardFlow(), m_Flow.ForwardCost(), m_pGlobalMotionView, m_BlockField[m_iBlockField].pShaderResource,
+				  m_Flow.CurrentFrame(), m_Flow.PreviousFrame() },
+				blockConstants, std::size(blockConstants));
+			const float snapConstants[4] = { scaleX, scaleY, (float)m_Flow.GridSize(), m_FlowSettings.snapDeadZone };
+			Draw(pContext, m_pPSSnapMotion, { m_pMotionTarget }, m_width, m_height,
+				{ m_BlockField[write].pShaderResource, m_pGlobalMotionView }, snapConstants, std::size(snapConstants));
+			m_iBlockField = write;
+			m_bBlockHistory = true;
+			return;
+		}
 		if (m_bHaveMotion) {
 			m_iFlowFailures = 0;
 			const float motionConstants[12] = {
@@ -357,6 +505,7 @@ void CDlssStabilizer::PrepareMotion(ID3D11DeviceContext* pContext, ID3D11ShaderR
 		}
 
 		// No flow for this picture: no motion for the network, no trust in the history.
+		m_bBlockHistory = false;
 		const FLOAT zero[4] = { 0, 0, 0, 0 };
 		pContext->ClearRenderTargetView(m_pMotionTarget, zero);
 		pContext->ClearRenderTargetView(m_Confidence.pRenderTarget, zero);

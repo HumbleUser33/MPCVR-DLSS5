@@ -67,6 +67,10 @@ private:
 	CComPtr<ID3D11Buffer>         m_pFinalPassConstantBuffer;
 
 	DXGI_SWAP_EFFECT              m_UsedSwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+	// A window that has carried a flip model swap chain keeps it: Windows never takes
+	// one back to the older model, and a picture presented the old way into such a
+	// window never reaches the screen.
+	HWND                          m_hWndFlipModel = nullptr;
 
 #if TEST_SHADER
 	CComPtr<ID3D11PixelShader>    m_pPS_TEST;
@@ -192,6 +196,11 @@ private:
 	bool m_bVPRTXVideoHDR = false;
 	bool m_bVPUseRTXVideoHDR = false;
 
+	bool m_bVPReplaceChroma = false;    // the setting
+	bool m_bChromaReplacedVP = false;   // and the shaders rebuild this source's chroma
+	DXGI_FORMAT m_VPInputFmt = DXGI_FORMAT_UNKNOWN;   // what the processor reads: the source, or packed 4:4:4
+	CComPtr<ID3D11ComputeShader> m_pCSConvertTo444;   // what writes that 4:4:4 picture
+
 	CDlssNR m_DlssNR;
 	CDlssNR::Params m_DlssParams;
 	std::wstring m_strDlssNRDllPath;
@@ -211,7 +220,7 @@ private:
 	bool m_bDlssSR = false;             // user setting
 	bool m_bDlssSRActive = false;       // setting AND the NGX session is up
 	int  m_iDlssSRPreset = DLSSSR_PRESET_DEF;
-	CDlssStabilizer m_DlssSRMotion;     // Optical Flow vectors, motion only, when DLSS 5 NR has none to lend
+	CDlssStabilizer m_DlssSRMotion;     // Optical Flow vectors for DLSS SR, drawn to the global motion
 	bool m_bDlssSRNewPicture = false;   // the next pass sees a new picture, not a redraw
 	std::wstring m_strDlssSRMotion;     // where the vectors came from, for the statistics
 
@@ -373,6 +382,12 @@ public:
 	BOOL VerifyMediaType(const CMediaType* pmt) override;
 	BOOL InitMediaType(const CMediaType* pmt) override;
 
+	// Whether the shaders rebuild this source's chroma before the processor takes it.
+	bool ChromaToShaders(const FmtConvParams_t& params, const bool interlaced);
+	HRESULT UpdateConvertTo444Shader();
+	const wchar_t* ChromaScalingName() const;
+	void ConvertTo444Pass(ID3D11UnorderedAccessView* pUav);
+
 	HRESULT InitializeD3D11VP(const FmtConvParams_t& params, const UINT width, const UINT height, const CMediaType* pmt);
 	HRESULT InitializeTexVP(const FmtConvParams_t& params, const UINT width, const UINT height);
 	void UpdatFrameProperties(); // use this after receiving modified frame from hardware decoder
@@ -400,7 +415,9 @@ public:
 		}
 		// It only resizes while no DLSS pass has taken that back from it (UpdateTexures).
 		const bool bResizes = m_bVPScaling && !m_bVPScalingUseShaders && !m_bDlssNRActive && !m_bDlssSRActive;
-		return VPUSE_Converting | (bResizes ? VPUSE_Resizing : 0);
+		// With the chroma rebuilt before it, the processor is handed 4:4:4 and the
+		// chroma list is the shaders', so it is not the one converting chroma.
+		return (m_bChromaReplacedVP ? 0 : VPUSE_Converting) | (bResizes ? VPUSE_Resizing : 0);
 	}
 
 	// Settings

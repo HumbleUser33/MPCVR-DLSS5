@@ -298,7 +298,9 @@ HRESULT CVRDlssPPage::OnActivate()
 		"Works with or without DLSS 5 NR. Requires nvngx_dlss.dll (DLSS 4.5,\n"
 		"310.5 or later) and an RTX GPU. Motion comes from NVIDIA Optical Flow;\n"
 		"where DLSS cannot run, the Upscaling method takes over.\n"
-		"Experimental: DLSS removes film grain along with compression noise.");
+		"Experimental: on grainy film, moving subjects can still shimmer a\n"
+		"little, as estimated motion is never exact, and DLSS removes film\n"
+		"grain along with compression noise.");
 	AddHint(IDC_COMBO15,
 		L"Automatic lets DLSS pick the model for the scale: with 310.9,\n"
 		"M for x2 (1080p on a 4K screen), L for x3 (720p), K below x1.85.\n"

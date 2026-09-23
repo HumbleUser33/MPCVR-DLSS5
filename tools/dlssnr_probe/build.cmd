@@ -34,6 +34,9 @@ fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_motion_mask.cso "%SH%\ps_dlss_motion.hlsl"
 fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_stab_flowframe.cso "%SH%\ps_dlss_stabilize.hlsl" /DPASS=0 >NUL || EXIT /B 1
 fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_stab_flowmotion.cso "%SH%\ps_dlss_stabilize.hlsl" /DPASS=1 >NUL || EXIT /B 1
 fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_stab_stabilize.cso "%SH%\ps_dlss_stabilize.hlsl" /DPASS=2 >NUL || EXIT /B 1
+fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_stab_snapmotion.cso "%SH%\ps_dlss_stabilize.hlsl" /DPASS=3 >NUL || EXIT /B 1
+fxc /nologo /O2 /T ps_4_0 /Fo ps_dlss_stab_blockmotion.cso "%SH%\ps_dlss_stabilize.hlsl" /DPASS=4 >NUL || EXIT /B 1
+fxc /nologo /O2 /T cs_5_0 /Fo cs_dlss_global_motion.cso "%SH%\cs_dlss_global_motion.hlsl" >NUL || EXIT /B 1
 rc /nologo /fo detector_shaders.res detector_shaders.rc || EXIT /B 1
 
 REM ONNX Runtime with DirectML, when it has been fetched into external\onnxruntime.
@@ -64,16 +67,30 @@ cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x
    "%SRC%\D3D11VP.cpp" "%SRC%\DX11Helper.cpp" ^
    /Fe:vp_rebuild_test.exe /link strmiids.lib || EXIT /B 1
 
+ECHO Building the video processor probe (what it does with 4:2:0 and with 4:4:4)...
+cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 ^
+   /DUNICODE /D_UNICODE /I"%SRC%" vp444_probe.cpp ^
+   "%SRC%\D3D11VP.cpp" "%SRC%\DX11Helper.cpp" ^
+   /Fe:vp444_probe.exe /link strmiids.lib || EXIT /B 1
+
+ECHO Building the 4:4:4 chroma pass test (the shaders the filter generates, compiled)...
+cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 ^
+   /DUNICODE /D_UNICODE /I"%SRC%" shader444_test.cpp shader444_guids.cpp ^
+   "%SRC%\Shaders.cpp" "%SRC%\Helper.cpp" "%SRC%\csputils.cpp" ^
+   "%SRC%\Utils\Util.cpp" "%SRC%\Utils\CPUInfo.cpp" "%SRC%\DX11Helper.cpp" ^
+   /Fe:shader444_test.exe /link strmiids.lib windowscodecs.lib mfuuid.lib || EXIT /B 1
+
 ECHO Building the playback test (render ahead in a DirectShow graph, needs the x64 filter built)...
 cl /nologo /EHsc /std:c++20 /O2 /MT /DNOMINMAX /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /DNDEBUG ^
    /DUNICODE /D_UNICODE /I"%SRC%" /I"..\..\external\BaseClasses" playback_test.cpp ^
-   /Fe:playback_test.exe /link "..\..\_bin\lib\Release_x64\BaseClasses.lib" ^
+   /Fe:playback_test.exe /link "..\..\_bin\lib\Release_x64\BaseClasses.lib" dbghelp.lib d3d11.lib ^
    /MANIFEST:EMBED /MANIFESTINPUT:playback_test.manifest || EXIT /B 1
 
 DEL /Q *.obj *.exp *.cso *.res 2>NUL
 
 ECHO.
-ECHO Run dlssnr_harness.exe, vp_rebuild_test.exe and playback_test.exe before putting a build in the player.
+ECHO Run dlssnr_harness.exe, vp_rebuild_test.exe, shader444_test.exe and playback_test.exe
+ECHO before putting a build in the player.
 ECHO.
 ECHO Done. Usage:
 ECHO   dlssnr_probe.exe                  report only, nothing altered

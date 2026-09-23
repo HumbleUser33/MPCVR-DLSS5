@@ -23,19 +23,30 @@
 //   playback_test.exe [--seconds 20] [--size 800x450] [--window 1280x720] [--fps 23.976] [--only N] [--scalers]
 //   playback_test.exe --dlsspage N    shows the filter's DLSS page for N seconds instead
 //   playback_test.exe --mainpage N    the same for the Settings page
+//   playback_test.exe --chroma10 <png>  --chroma in ten bits: P010 against a Y410 reference
+//   playback_test.exe --chroma <png> --interlaced   the media type says interlaced, to see
+//   playback_test.exe --toggle          settings changed in full playback, as the player does
+//                                     which processor then converts the picture
 
 #include <windows.h>
 #include <VersionHelpers.h>
 #include <streams.h>
 #include <dvdmedia.h>
 #include <atlbase.h>
+#include <d3d11.h>
 #include <d3d9.h>
+#include <dxva2api.h>
+#include <wincodec.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <format>
 #include <string>
+#include <atomic>
+#include <thread>
 #include <vector>
 #include "IVideoRenderer.h"
+#include "../../Include/ID3DVideoMemoryConfiguration.h"
 #include "../../Include/FilterInterfaces.h"
 
 #pragma comment(lib, "strmiids.lib")
@@ -56,6 +67,24 @@ static const CLSID CLSID_MpcVideoRenderer = { 0x71F080AA, 0x8661, 0x4093, { 0xB1
 static REFERENCE_TIME g_frameDuration = 417083; // 23.976 fps unless --fps says otherwise
 static bool g_bScalers = false; // --scalers: a still picture, in NV12
 static bool g_bHardwareVP = false; // --vp: leave the video processor the formats it is set for
+// --chroma: one still picture fed as 4:2:0 and as 4:4:4, at 1:1, to see what each
+// chroma upsampler rebuilds -- the hardware video processor included.
+static bool g_bChroma = false;
+static bool g_bChroma444 = false;      // this run feeds AYUV, the reference
+static bool g_bToggle = false;         // --toggle: settings changed while the film plays
+static bool g_bToggleHdr = false;      // --toggle --hdr: with HDR passthrough, the case that freezes
+static bool g_bToggleThread = false;   // --toggle --thread: applied from another thread, as the player's page does
+static bool g_bToggleSwitch = false;   // --toggle --switch: the processor's extras as the chroma moves to the shaders and back
+static const wchar_t* g_filmFile = nullptr;  // --file <path>: a real film, split and decoded as the player does
+static bool g_bToggleGpu = false;      // --toggle --gpu: the pictures arrive as D3D11 textures, as from a hardware decoder
+static double g_filmSeek = 0;          // --seek <seconds>: where to start in it
+// The picture is fed as NV12 wherever the hardware video processor has to be able
+// to take it; elsewhere RGB32 keeps the film exact.
+static bool NV12Source() { return g_bScalers || g_bToggle; }
+static bool g_bChroma10 = false;       // --chroma10: 10 bits, P010 against Y410
+static bool g_bInterlaced = false;     // --interlaced: the media type says so, to see who converts
+static std::vector<BYTE> g_refPicture; // BGRA, top-down, the picture --chroma plays
+static bool g_bChromaVerbose = false;  // --verbose: the whole overlay of each run
 
 // The film: soft gradients, a textured band and discs moving at different speeds,
 // so Optical Flow and the networks have real work. For --scalers it stands still, in
@@ -81,6 +110,50 @@ public:
 
 	HRESULT GetMediaType(CMediaType* pmt) override
 	{
+		if (g_bChroma) {
+			// The colour is said, not guessed: both paths then read the picture the
+			// same way and only the chroma upsampling differs.
+			auto vih2 = (VIDEOINFOHEADER2*)pmt->AllocFormatBuffer(sizeof(VIDEOINFOHEADER2));
+			if (!vih2) {
+				return E_OUTOFMEMORY;
+			}
+			ZeroMemory(vih2, sizeof(VIDEOINFOHEADER2));
+			vih2->AvgTimePerFrame = g_frameDuration;
+			vih2->dwPictAspectRatioX = m_width;
+			vih2->dwPictAspectRatioY = m_height;
+			DXVA2_ExtendedFormat ex = {};
+			ex.SampleFormat           = AMCONTROL_USED | AMCONTROL_COLORINFO_PRESENT;
+			ex.VideoChromaSubsampling = DXVA2_VideoChromaSubsampling_MPEG2; // left sited
+			ex.NominalRange           = DXVA2_NominalRange_16_235;
+			ex.VideoTransferMatrix    = DXVA2_VideoTransferMatrix_BT709;
+			ex.VideoLighting          = DXVA2_VideoLighting_dim;
+			ex.VideoPrimaries         = DXVA2_VideoPrimaries_BT709;
+			ex.VideoTransferFunction  = DXVA2_VideoTransFunc_709;
+			vih2->dwControlFlags = ex.value;
+			if (g_bInterlaced) {
+				// Only the flag matters here: it decides which processor takes the picture.
+				vih2->dwInterlaceFlags = AMINTERLACE_IsInterlaced | AMINTERLACE_DisplayModeBobOrWeave;
+			}
+			vih2->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+			vih2->bmiHeader.biWidth = m_width;
+			vih2->bmiHeader.biHeight = m_height;
+			vih2->bmiHeader.biPlanes = 1;
+			vih2->bmiHeader.biBitCount = g_bChroma444 ? 32 : g_bChroma10 ? 24 : 12;
+			vih2->bmiHeader.biCompression = g_bChroma444
+				? (g_bChroma10 ? MAKEFOURCC('Y', '4', '1', '0') : MAKEFOURCC('A', 'Y', 'U', 'V'))
+				: (g_bChroma10 ? MAKEFOURCC('P', '0', '1', '0') : MAKEFOURCC('N', 'V', '1', '2'));
+			vih2->bmiHeader.biSizeImage = SampleSize();
+			SetRect(&vih2->rcSource, 0, 0, m_width, m_height);
+			SetRect(&vih2->rcTarget, 0, 0, m_width, m_height);
+			const FOURCCMap subtype(vih2->bmiHeader.biCompression);
+			pmt->SetType(&MEDIATYPE_Video);
+			pmt->SetSubtype(&subtype);
+			pmt->SetFormatType(&FORMAT_VideoInfo2);
+			pmt->SetTemporalCompression(FALSE);
+			pmt->SetSampleSize(vih2->bmiHeader.biSizeImage);
+			return S_OK;
+		}
+
 		auto vih = (VIDEOINFOHEADER*)pmt->AllocFormatBuffer(sizeof(VIDEOINFOHEADER));
 		if (!vih) {
 			return E_OUTOFMEMORY;
@@ -91,13 +164,14 @@ public:
 		vih->bmiHeader.biWidth = m_width;
 		vih->bmiHeader.biHeight = m_height;
 		vih->bmiHeader.biPlanes = 1;
-		vih->bmiHeader.biBitCount = g_bScalers ? 12 : 32;
-		vih->bmiHeader.biCompression = g_bScalers ? MAKEFOURCC('N', 'V', '1', '2') : BI_RGB;
+		const bool bNV12 = NV12Source();
+		vih->bmiHeader.biBitCount = bNV12 ? 12 : 32;
+		vih->bmiHeader.biCompression = bNV12 ? MAKEFOURCC('N', 'V', '1', '2') : BI_RGB;
 		vih->bmiHeader.biSizeImage = SampleSize();
 		SetRect(&vih->rcSource, 0, 0, m_width, m_height);
 		SetRect(&vih->rcTarget, 0, 0, m_width, m_height);
 		pmt->SetType(&MEDIATYPE_Video);
-		pmt->SetSubtype(g_bScalers ? &MEDIASUBTYPE_NV12 : &MEDIASUBTYPE_RGB32);
+		pmt->SetSubtype(bNV12 ? &MEDIASUBTYPE_NV12 : &MEDIASUBTYPE_RGB32);
 		pmt->SetFormatType(&FORMAT_VideoInfo);
 		pmt->SetTemporalCompression(FALSE);
 		pmt->SetSampleSize(vih->bmiHeader.biSizeImage);
@@ -106,7 +180,11 @@ public:
 
 	long SampleSize() const
 	{
-		return g_bScalers ? m_width * m_height * 3 / 2 : m_width * m_height * 4;
+		if (g_bChroma) {
+			return g_bChroma444 ? m_width * m_height * 4
+				: g_bChroma10 ? m_width * m_height * 3 : m_width * m_height * 3 / 2;
+		}
+		return NV12Source() ? m_width * m_height * 3 / 2 : m_width * m_height * 4;
 	}
 
 	HRESULT DecideBufferSize(IMemAllocator* pAlloc, ALLOCATOR_PROPERTIES* pProps) override
@@ -122,11 +200,127 @@ public:
 		return actual.cbBuffer < pProps->cbBuffer ? E_FAIL : S_OK;
 	}
 
+	// BT.709, limited range, from a BGRA pixel.
+	static void ToYCbCr(const BYTE* bgra, double& y, double& cb, double& cr)
+	{
+		const double r = bgra[2] / 255.0, g = bgra[1] / 255.0, b = bgra[0] / 255.0;
+		const double luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+		y  = 16.0 + 219.0 * luma;
+		cb = 128.0 + 224.0 * (b - luma) / 1.8556;
+		cr = 128.0 + 224.0 * (r - luma) / 1.5748;
+	}
+
+	// The picture as 4:4:4 (AYUV: V, U, Y, A) or as 4:2:0 (NV12) with the chroma
+	// sited to the left, which is what the media type says and what video uses:
+	// [1 2 1] / 4 across, centred on the even column, and the two rows averaged.
+	// The same picture in ten bits: Y410 packs U, Y, V and two bits of alpha into a
+	// word, P010 keeps the ten bits in the high bits of each 16-bit sample.
+	void WriteChromaSample10(BYTE* p) const
+	{
+		const int w = m_width, h = m_height;
+		const auto At = [&](int x, int y) { return &g_refPicture[((size_t)std::clamp(y, 0, h - 1) * w + std::clamp(x, 0, w - 1)) * 4]; };
+		const auto Q = [](double v) { return (UINT)std::lround(std::clamp(v * 4.0, 0.0, 1023.0)); };
+		if (g_bChroma444) {
+			UINT* d = (UINT*)p;
+			for (int y = 0; y < h; y++) {
+				for (int x = 0; x < w; x++) {
+					double luma, cb, cr;
+					ToYCbCr(At(x, y), luma, cb, cr);
+					d[(size_t)y * w + x] = Q(cb) | (Q(luma) << 10) | (Q(cr) << 20) | (3u << 30);
+				}
+			}
+			return;
+		}
+		UINT16* d = (UINT16*)p;
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				double luma, cb, cr;
+				ToYCbCr(At(x, y), luma, cb, cr);
+				d[(size_t)y * w + x] = (UINT16)(Q(luma) << 6);
+			}
+		}
+		UINT16* uv = d + (size_t)w * h;
+		for (int y = 0; y < h / 2; y++) {
+			for (int x = 0; x < w / 2; x++) {
+				double cb = 0, cr = 0;
+				for (int j = 0; j < 2; j++) {
+					static const double weights[3] = { 0.25, 0.5, 0.25 };
+					for (int i = -1; i <= 1; i++) {
+						double luma, b, r;
+						ToYCbCr(At(2 * x + i, 2 * y + j), luma, b, r);
+						cb += weights[i + 1] * b;
+						cr += weights[i + 1] * r;
+					}
+				}
+				uv[(size_t)y * w + 2 * x]     = (UINT16)(Q(cb / 2) << 6);
+				uv[(size_t)y * w + 2 * x + 1] = (UINT16)(Q(cr / 2) << 6);
+			}
+		}
+	}
+
+	void WriteChromaSample(BYTE* p) const
+	{
+		if (g_bChroma10) {
+			WriteChromaSample10(p);
+			return;
+		}
+		const int w = m_width, h = m_height;
+		const auto At = [&](int x, int y) { return &g_refPicture[((size_t)std::clamp(y, 0, h - 1) * w + std::clamp(x, 0, w - 1)) * 4]; };
+		if (g_bChroma444) {
+			for (int y = 0; y < h; y++) {
+				for (int x = 0; x < w; x++) {
+					double luma, cb, cr;
+					ToYCbCr(At(x, y), luma, cb, cr);
+					BYTE* d = p + ((size_t)y * w + x) * 4;
+					d[0] = (BYTE)std::lround(std::clamp(cr, 0.0, 255.0));
+					d[1] = (BYTE)std::lround(std::clamp(cb, 0.0, 255.0));
+					d[2] = (BYTE)std::lround(std::clamp(luma, 0.0, 255.0));
+					d[3] = 255;
+				}
+			}
+			return;
+		}
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				double luma, cb, cr;
+				ToYCbCr(At(x, y), luma, cb, cr);
+				p[(size_t)y * w + x] = (BYTE)std::lround(std::clamp(luma, 0.0, 255.0));
+			}
+		}
+		BYTE* uv = p + (size_t)w * h;
+		for (int y = 0; y < h / 2; y++) {
+			for (int x = 0; x < w / 2; x++) {
+				double cb = 0, cr = 0;
+				for (int j = 0; j < 2; j++) {
+					static const double weights[3] = { 0.25, 0.5, 0.25 };
+					for (int i = -1; i <= 1; i++) {
+						double luma, b, r;
+						ToYCbCr(At(2 * x + i, 2 * y + j), luma, b, r);
+						cb += weights[i + 1] * b;
+						cr += weights[i + 1] * r;
+					}
+				}
+				uv[(size_t)y * w + 2 * x]     = (BYTE)std::lround(std::clamp(cb / 2, 0.0, 255.0));
+				uv[(size_t)y * w + 2 * x + 1] = (BYTE)std::lround(std::clamp(cr / 2, 0.0, 255.0));
+			}
+		}
+	}
+
 	HRESULT FillBuffer(IMediaSample* pSample) override
 	{
 		BYTE* p = nullptr;
 		if (FAILED(pSample->GetPointer(&p)) || pSample->GetSize() < SampleSize()) {
 			return E_FAIL;
+		}
+		if (g_bChroma) {
+			WriteChromaSample(p);
+			REFERENCE_TIME start = m_frame * g_frameDuration;
+			REFERENCE_TIME end = start + g_frameDuration;
+			pSample->SetTime(&start, &end);
+			pSample->SetSyncPoint(TRUE);
+			pSample->SetActualDataLength(SampleSize());
+			m_frame++;
+			return S_OK;
 		}
 		const int still = g_bScalers ? 0 : m_frame;
 		const double t = still;
@@ -169,7 +363,7 @@ public:
 				row[x * 4 + 3] = 255;
 			}
 		}
-		if (g_bScalers) {
+		if (NV12Source()) {
 			// BT.601 limited range, what the renderer assumes for a picture of this
 			// size, chroma averaged over 2x2 blocks.
 			for (int y = 0; y < m_height; y++) {
@@ -281,6 +475,9 @@ struct Config {
 	bool bAhead;
 	int iUpscaling = -1;     // UPSCALE_*, -1: the saved setting
 	int iChromaScaling = -1; // CHROMA_*, -1: the saved setting
+	bool bHardwareVP = false; // --chroma: this run goes through the hardware processor
+	bool b444 = false;        // --chroma: this run feeds 4:4:4, the reference
+	bool bReplaceChroma = false; // --chroma: the processor keeps the picture, the shaders its chroma
 };
 
 struct Result {
@@ -294,6 +491,7 @@ struct Result {
 	int lateAtEnd = 0;
 	std::wstring nrLine, srLine, dlssTimes, aheadLine;
 	std::wstring vprocLine, scalingLine, prescaleTimes;
+	std::wstring statsAll; // --chroma: the whole overlay, to see what else differs
 	std::vector<BYTE> picture;      // BGRA, top-down, as displayed
 	std::vector<BYTE> statsPicture; // the same with the statistics drawn over it
 	int pictureW = 0, pictureH = 0;
@@ -320,6 +518,68 @@ static bool GrabDisplayed(IBaseFilter* pRenderer, std::vector<BYTE>& bgra, int& 
 	}
 	LocalFree(data);
 	return ok;
+}
+
+// The picture --chroma plays: the middle w x h of the file, so the renderer shows
+// it at its own size and no resize shader takes part in the measurement.
+static bool LoadPicture(const wchar_t* path, int w, int h, std::string& error)
+{
+	CComPtr<IWICImagingFactory> factory;
+	HRESULT hr = factory.CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER);
+	CComPtr<IWICBitmapDecoder> decoder;
+	if (SUCCEEDED(hr)) {
+		hr = factory->CreateDecoderFromFilename(path, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder);
+	}
+	CComPtr<IWICBitmapFrameDecode> frame;
+	if (SUCCEEDED(hr)) {
+		hr = decoder->GetFrame(0, &frame);
+	}
+	UINT sw = 0, sh = 0;
+	if (SUCCEEDED(hr)) {
+		hr = frame->GetSize(&sw, &sh);
+	}
+	if (FAILED(hr)) {
+		error = std::format("cannot decode the picture (0x{:08X})", (unsigned)hr);
+		return false;
+	}
+	// A 4K frame is reduced by two, which is what a careful encoder does and what
+	// the harness measures on: the middle of the picture cropped at that size would
+	// keep chroma far smoother than real video of this size ever is.
+	const int factor = ((int)sw >= 2 * w && (int)sh >= 2 * h) ? 2 : 1;
+	if ((int)sw < factor * w || (int)sh < factor * h) {
+		error = std::format("the picture is {}x{}, smaller than the {}x{} asked for", sw, sh, w, h);
+		return false;
+	}
+	CComPtr<IWICFormatConverter> converter;
+	hr = factory->CreateFormatConverter(&converter);
+	if (SUCCEEDED(hr)) {
+		hr = converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+	}
+	std::vector<BYTE> taken(4 * (size_t)factor * w * factor * h);
+	const WICRect rect = { (INT)(sw - factor * w) / 2, (INT)(sh - factor * h) / 2, factor * w, factor * h };
+	if (SUCCEEDED(hr)) {
+		hr = converter->CopyPixels(&rect, 4 * (UINT)factor * w, (UINT)taken.size(), taken.data());
+	}
+	if (FAILED(hr)) {
+		error = std::format("cannot read the pixels (0x{:08X})", (unsigned)hr);
+		return false;
+	}
+	g_refPicture.assign(4 * (size_t)w * h, 0);
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			for (int k = 0; k < 4; k++) {
+				int acc = 0;
+				for (int j = 0; j < factor; j++) {
+					for (int i = 0; i < factor; i++) {
+						acc += taken[4 * ((size_t)(factor * y + j) * factor * w + factor * x + i) + k];
+					}
+				}
+				g_refPicture[4 * ((size_t)y * w + x) + k] = (BYTE)((acc + factor * factor / 2) / (factor * factor));
+			}
+		}
+	}
+	printf("picture: %dx%d, reduced by %d from the file\n", w, h, factor);
+	return true;
 }
 
 static bool SaveBmp(const std::wstring& path, const std::vector<BYTE>& bgra, int w, int h)
@@ -406,6 +666,16 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 	if (config.iChromaScaling >= 0) {
 		sets.iChromaScaling = config.iChromaScaling;
 	}
+	if (g_bChroma) {
+		// Nothing but the chroma upsampling changes between the runs: the picture is
+		// shown at its own size, the dither would add noise of its own, and the
+		// formats decide whether the hardware processor converts or the shaders do.
+		sets.VPFmts = { config.bHardwareVP, config.bHardwareVP, config.bHardwareVP, config.bHardwareVP };
+		sets.bVPReplaceChroma = config.bReplaceChroma;
+		sets.bVPScaling = false;
+		sets.iTexFormat = TEXFMT_AUTOINT;
+		sets.bUseDither = false;
+	}
 	if (g_bScalers && !g_bHardwareVP) {
 		// The shader video processor converts and scales, not the hardware one.
 		sets.VPFmts = { false, false, false, false };
@@ -455,16 +725,27 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 	result.dlssTimes = StatsLine(text, L"DLSS (ms)     : ");
 	result.aheadLine = StatsLine(text, L"Render ahead  : ");
 	result.vprocLine = StatsLine(text, L"VideoProcessor: ");
+	result.statsAll = text;
 	result.scalingLine = StatsLine(text, L"Scaling       : ");
 	result.prescaleTimes = StatsLine(text, L"Prescale (ms) : ");
-	if (g_bScalers) {
+	if (g_bScalers || g_bChroma) {
 		// One picture with the statistics over it, for the look of the box.
 		GrabDisplayed(pRenderer, result.statsPicture, result.pictureW, result.pictureH);
-		// Then one without, which is what the configurations are compared on.
+		// Then one without, which is what the configurations are compared on. The
+		// back buffer of a flip-discard swap chain is not always the picture just
+		// presented, so the same picture has to come back twice before it is taken.
 		sets.bShowStats = false;
 		pVR->SetSettings(sets);
 		Pump(800);
-		GrabDisplayed(pRenderer, result.picture, result.pictureW, result.pictureH);
+		std::vector<BYTE> previous;
+		for (int attempt = 0; attempt < 8; attempt++) {
+			GrabDisplayed(pRenderer, result.picture, result.pictureW, result.pictureH);
+			if (!result.picture.empty() && result.picture == previous) {
+				break;
+			}
+			previous = result.picture;
+			Pump(250);
+		}
 	}
 
 	// State changes while pictures are being held.
@@ -626,6 +907,68 @@ static int ShowPropertyPage(HMODULE hFilter, HWND hwnd, int seconds, REFCLSID cl
 	return 0;
 }
 
+// What one displayed picture keeps of the 4:4:4 one, chroma first: the luma is the
+// same in both, so what differs is what the upsampler made of Cb and Cr.
+struct ChromaMetrics {
+	double psnrRgb = 0;
+	double psnrChroma = 0; // Cb and Cr, from the displayed pixels
+	double psnrEdges = 0;  // the same where the luma has edges, where bleeding shows
+	double offsetCb = 0;   // a constant shift of the colour, in 8-bit levels
+	double offsetCr = 0;
+};
+
+static ChromaMetrics ScoreChroma(const std::vector<BYTE>& test, const std::vector<BYTE>& ref, int w, int h)
+{
+	const auto Chroma = [](const BYTE* p, double& y, double& cb, double& cr) {
+		const double r = p[2] / 255.0, g = p[1] / 255.0, b = p[0] / 255.0;
+		y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+		cb = (b - y) / 1.8556;
+		cr = (r - y) / 1.5748;
+	};
+	double seRgb = 0, seChroma = 0, seEdges = 0, sumCb = 0, sumCr = 0;
+	size_t edges = 0;
+	const size_t n = (size_t)w * h;
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			const size_t i = ((size_t)y * w + x) * 4;
+			double ty, tcb, tcr, ry, rcb, rcr;
+			Chroma(&test[i], ty, tcb, tcr);
+			Chroma(&ref[i], ry, rcb, rcr);
+			for (int k = 0; k < 3; k++) {
+				const double d = (test[i + k] - ref[i + k]) / 255.0;
+				seRgb += d * d;
+			}
+			const double dcb = tcb - rcb, dcr = tcr - rcr;
+			seChroma += dcb * dcb + dcr * dcr;
+			sumCb += dcb;
+			sumCr += dcr;
+			// An edge of the luma next door: chroma errors show as bleeding there.
+			const size_t right = ((size_t)y * w + std::min(x + 1, w - 1)) * 4;
+			const size_t below = ((size_t)std::min(y + 1, h - 1) * w + x) * 4;
+			double ny, ncb, ncr, by, bcb, bcr;
+			Chroma(&ref[right], ny, ncb, ncr);
+			Chroma(&ref[below], by, bcb, bcr);
+			if (std::abs(ny - ry) + std::abs(by - ry) > 0.05) {
+				seEdges += dcb * dcb + dcr * dcr;
+				edges++;
+			}
+		}
+	}
+	const auto Psnr = [](double mse) { return mse > 0 ? 10.0 * std::log10(1.0 / mse) : 99.0; };
+	ChromaMetrics m;
+	m.psnrRgb = Psnr(seRgb / (3.0 * n));
+	m.psnrChroma = Psnr(seChroma / (2.0 * n));
+	m.psnrEdges = edges ? Psnr(seEdges / (2.0 * edges)) : 99.0;
+	m.offsetCb = 255.0 * sumCb / n;
+	m.offsetCr = 255.0 * sumCr / n;
+	return m;
+}
+
+#include "screen_watch.inl"
+#include "file_graph.inl"
+#include "d3d11_source.inl"
+#include "toggle_suite.inl"
+
 int wmain(int argc, wchar_t* argv[])
 {
 	setvbuf(stdout, nullptr, _IONBF, 0); // so a crash keeps what was already reported
@@ -635,6 +978,8 @@ int wmain(int argc, wchar_t* argv[])
 	int pageSeconds = 0;
 	bool bMainPage = false;
 	int clickControl = 0; // --click N: a control to tick once the page is up
+	const wchar_t* chromaFile = nullptr; // --chroma <file>: the picture to measure on
+	const wchar_t* filterFile = nullptr; // --filter <path>: another build of the x64 filter, to compare with
 	SIZE source = { 800, 450 };
 	SIZE window = { 1280, 720 };
 	for (int i = 1; i + 1 < argc; i++) {
@@ -652,6 +997,16 @@ int wmain(int argc, wchar_t* argv[])
 			pageSeconds = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--click")) {
 			clickControl = _wtoi(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--filter")) {
+			filterFile = argv[i + 1];
+		} else if (!wcscmp(argv[i], L"--file")) {
+			g_filmFile = argv[i + 1];
+		} else if (!wcscmp(argv[i], L"--seek")) {
+			g_filmSeek = _wtof(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--chroma") || !wcscmp(argv[i], L"--chroma10")) {
+			g_bChroma = true;
+			g_bChroma10 = !wcscmp(argv[i], L"--chroma10");
+			chromaFile = argv[i + 1];
 		} else if (!wcscmp(argv[i], L"--mainpage")) {
 			pageSeconds = _wtoi(argv[i + 1]);
 			bMainPage = true;
@@ -664,15 +1019,47 @@ int wmain(int argc, wchar_t* argv[])
 			source.cy &= ~1;
 		} else if (!wcscmp(argv[i], L"--vp")) {
 			g_bHardwareVP = true;
+		} else if (!wcscmp(argv[i], L"--verbose")) {
+			g_bChromaVerbose = true;
+		} else if (!wcscmp(argv[i], L"--interlaced")) {
+			g_bInterlaced = true;
+		} else if (!wcscmp(argv[i], L"--hdr")) {
+			g_bToggleHdr = true;
+		} else if (!wcscmp(argv[i], L"--switch")) {
+			g_bToggleSwitch = true;
+		} else if (!wcscmp(argv[i], L"--gpu")) {
+			g_bToggleGpu = true;
+		} else if (!wcscmp(argv[i], L"--thread")) {
+			g_bToggleThread = true;
+		} else if (!wcscmp(argv[i], L"--toggle")) {
+			g_bToggle = true;
+			source.cx &= ~1; // NV12
+			source.cy &= ~1;
 		}
 	}
 
 	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+	if (g_bChroma) {
+		// The picture is shown at its own size: no resize shader takes part, so the
+		// only difference between the runs is what rebuilt Cb and Cr.
+		source.cx &= ~1;
+		source.cy &= ~1;
+		std::string error = chromaFile ? std::string() : "a picture file is needed: --chroma <file>";
+		if (!chromaFile || !LoadPicture(chromaFile, source.cx, source.cy, error)) {
+			printf("--chroma: %s\n", error.c_str());
+			return 1;
+		}
+		window = source;
+	}
+
 	wchar_t exe[MAX_PATH] = {};
 	GetModuleFileNameW(nullptr, exe, MAX_PATH);
 	std::wstring filterPath = exe;
 	filterPath = filterPath.substr(0, filterPath.find_last_of(L'\\')) + L"\\..\\..\\_bin\\Filter_x64\\MpcVideoRenderer64.ax";
+	if (filterFile) {
+		filterPath = filterFile;
+	}
 	HMODULE hFilter = LoadLibraryExW(filterPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 	if (!hFilter) {
 		wprintf(L"cannot load %s\n", filterPath.c_str());
@@ -710,6 +1097,13 @@ int wmain(int argc, wchar_t* argv[])
 		return rc;
 	}
 
+	if (g_bToggle) {
+		const int rc = RunToggleSuite(hFilter, hwnd, source, window, seconds > 20 ? 20 : seconds);
+		DestroyWindow(hwnd);
+		CoUninitialize();
+		return rc;
+	}
+
 	static const Config dlssConfigs[] = {
 		{ "DLSS off",                       false, false, true  },
 		{ "DLSS SR, render ahead off",      false, true,  false },
@@ -727,12 +1121,32 @@ int wmain(int argc, wchar_t* argv[])
 		{ "Catmull-Rom, chroma RAVU-zoom",   false, false, true, UPSCALE_CatmullRom, CHROMA_RAVU       },
 		{ "RAVU-zoom, chroma RAVU-zoom",     false, false, true, UPSCALE_RAVUZoom,   CHROMA_RAVU       },
 	};
-	const Config* configs = g_bScalers ? scalerConfigs : dlssConfigs;
-	const int configCount = g_bScalers ? (int)std::size(scalerConfigs) : (int)std::size(dlssConfigs);
+	// The reference comes first: the same picture in 4:4:4, which needs no chroma
+	// upsampling at all, through the same conversion to RGB.
+	static const Config chromaConfigs[] = {
+		{ "4:4:4 (AYUV), nothing to upsample", false, false, true, -1, -1,                false, true  },
+		{ "4:2:0, hardware video processor",   false, false, true, -1, -1,                true,  false },
+		{ "4:2:0, hardware VP, chroma replaced", false, false, true, -1, CHROMA_CatmullRom, true, false, true },
+		{ "4:2:0, hardware VP, chroma replaced, RAVU", false, false, true, -1, CHROMA_RAVU, true, false, true },
+		{ "4:2:0, shaders, Nearest",           false, false, true, -1, CHROMA_Nearest                  },
+		{ "4:2:0, shaders, Bilinear",          false, false, true, -1, CHROMA_Bilinear                 },
+		{ "4:2:0, shaders, Catmull-Rom",       false, false, true, -1, CHROMA_CatmullRom               },
+		{ "4:2:0, shaders, RAVU-zoom",         false, false, true, -1, CHROMA_RAVU                     },
+	};
+	const Config* configs = g_bChroma ? chromaConfigs : g_bScalers ? scalerConfigs : dlssConfigs;
+	const int configCount = (int)(g_bChroma ? std::size(chromaConfigs)
+		: g_bScalers ? std::size(scalerConfigs) : std::size(dlssConfigs));
 
 	printf("Film %ldx%ld at %.3f fps in a %ldx%ld window, %d s per configuration after 5 s to settle.\n",
 		source.cx, source.cy, 10000000.0 / g_frameDuration, window.cx, window.cy, seconds);
-	printf("Sync offset in ms: when Present returned, against the picture's time.\n\n");
+	if (g_bChroma) {
+		printf("BT.709, limited range, chroma sited left, shown at 1:1 with the dither off.\n");
+		printf("psnr-c: Cb and Cr of the displayed picture against the 4:4:4 one; psnr-e: the\n");
+		printf("same where the luma has edges, where bleeding shows; offset: the constant\n");
+		printf("shift of Cb and Cr, in 8-bit levels.\n\n");
+	} else {
+		printf("Sync offset in ms: when Present returned, against the picture's time.\n\n");
+	}
 
 	const std::wstring exeDir = std::wstring(exe).substr(0, std::wstring(exe).find_last_of(L'\\'));
 	std::vector<BYTE> firstPicture;
@@ -743,11 +1157,39 @@ int wmain(int argc, wchar_t* argv[])
 			continue;
 		}
 		const Config& config = configs[c];
+		g_bChroma444 = config.b444; // read by the source pin when the graph is built
 		const Result r = RunConfig(hFilter, hwnd, config, source, window, seconds);
 		printf("== %s\n", config.name);
 		if (!r.error.empty()) {
 			printf("   FAILED: %s\n", r.error.c_str());
 			failures++;
+			continue;
+		}
+		if (g_bChroma) {
+			wprintf(L"   processor    : %s\n", r.vprocLine.c_str());
+			if (g_bChromaVerbose) {
+				wprintf(L"%s\n", r.statsAll.c_str());
+			}
+			if (!r.prescaleTimes.empty()) {
+				wprintf(L"   prescale (ms): %s\n", r.prescaleTimes.c_str());
+			}
+			if (r.picture.empty()) {
+				printf("   FAIL: no displayed picture\n");
+				failures++;
+				continue;
+			}
+			SaveBmp(exeDir + L"\\chroma_" + std::to_wstring(c) + L".bmp", r.picture, r.pictureW, r.pictureH);
+			if (firstPicture.empty()) {
+				firstPicture = r.picture;
+				firstW = r.pictureW;
+				firstH = r.pictureH;
+				printf("   this is the reference the others are measured against\n\n");
+				printf("   %-36s %8s %8s %9s %13s\n", "", "psnr-c", "psnr-e", "psnr-rgb", "offset Cb/Cr");
+			} else if (r.pictureW == firstW && r.pictureH == firstH) {
+				const ChromaMetrics m = ScoreChroma(r.picture, firstPicture, firstW, firstH);
+				printf("   %-36s %8.2f %8.2f %9.2f  %+6.2f/%+6.2f\n", config.name,
+					m.psnrChroma, m.psnrEdges, m.psnrRgb, m.offsetCb, m.offsetCr);
+			}
 			continue;
 		}
 		if (g_bScalers) {

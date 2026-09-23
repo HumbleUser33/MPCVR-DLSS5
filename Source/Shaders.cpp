@@ -79,12 +79,44 @@ const char code_Bicubic_UV[] =
 	"colorUV = Q0 * w0.y + Q1 * w1.y + Q2 * w2.y + Q3 * w3.y;\n";
 
 
+// A compute shader has no implicit derivatives, so it cannot call Sample. The pictures
+// carry a single level, so naming that level reads the same texels: Sample(s, uv)
+// becomes SampleLevel(s, uv, 0), and the offset, where there is one, stays last.
+static void SampleAtTopLevel(std::string& code)
+{
+	constexpr std::string_view call = ".Sample(";
+	constexpr std::string_view level = ".SampleLevel(";
+
+	for (size_t at = code.find(call); at != std::string::npos; at = code.find(call, at)) {
+		code.replace(at, call.length(), level);
+
+		size_t pos = at + level.length();
+		unsigned depth = 1, commas = 0;
+		while (pos < code.length()) {
+			const char c = code[pos];
+			if (c == '(') {
+				depth++;
+			}
+			else if (c == ')' && !--depth) {
+				break;
+			}
+			else if (c == ',' && depth == 1 && ++commas == 2) {
+				break;   // the offset follows, and the level goes before it
+			}
+			pos++;
+		}
+		code.insert(pos, ", 0");
+		at = pos;
+	}
+}
+
 void ShaderGetPixels(
 	const bool bDX11,
 	const FmtConvParams_t& fmtParams,
 	const UINT chromaSubsampling,
 	const int chromaScaling,
 	const bool blendDeinterlace,
+	const DXGI_FORMAT packedFormat,   // DXGI_FORMAT_UNKNOWN: a pixel shader, as usual
 	std::string& code)
 {
 	int planes = 1;
@@ -183,7 +215,23 @@ void ShaderGetPixels(
 				"float2 Tex : TEXCOORD;"
 			"};\n");
 
-		code.append("\nfloat4 main(PS_INPUT input) : SV_Target\n{\n");
+		if (packedFormat != DXGI_FORMAT_UNKNOWN) {
+			// One thread per pixel of the picture the video processor will read; the
+			// reads and the chroma upsampling below are the pixel shader's, unchanged.
+			code.append("RWTexture2D<uint> packed : register(u0);\n");
+			code.append("\n[numthreads(8, 8, 1)]\nvoid main(uint3 threadId : SV_DispatchThreadID)\n{\n");
+			code.append(
+				"uint packedW, packedH;\n"
+				"packed.GetDimensions(packedW, packedH);\n"
+				"if (threadId.x >= packedW || threadId.y >= packedH) {\n"
+					"return;\n"
+				"}\n"
+				"PS_INPUT input;\n"
+				"input.Pos = 0;\n"
+				"input.Tex = ((float2)threadId.xy + 0.5) / wh;\n");
+		} else {
+			code.append("\nfloat4 main(PS_INPUT input) : SV_Target\n{\n");
+		}
 
 		switch (planes) {
 		case 1:
@@ -813,7 +861,7 @@ HRESULT GetShaderConvertColor(
 		}
 	}
 
-	ShaderGetPixels(bDX11, fmtParams, exFmt.VideoChromaSubsampling, chromaScaling, blendDeinterlace, code);
+	ShaderGetPixels(bDX11, fmtParams, exFmt.VideoChromaSubsampling, chromaScaling, blendDeinterlace, DXGI_FORMAT_UNKNOWN, code);
 
 	if (pDoviMetadata) {
 		if (has_mmr) {
@@ -934,4 +982,63 @@ HRESULT GetShaderConvertColor(
 	LPCSTR target = bDX11 ? "ps_4_0" : "ps_3_0";
 
 	return CompileShader(code, nullptr, target, ppCode);
+}
+
+HRESULT GetShaderConvertTo444(
+	const UINT width,
+	const long texW, const long texH,
+	const FmtConvParams_t& fmtParams,
+	const DXVA2_ExtendedFormat exFmt,
+	const int chromaScaling,
+	const DXGI_FORMAT packedFormat,
+	ID3DBlob** ppCode)
+{
+	DLog(L"GetShaderConvertTo444() started for {} {}x{} to {} chroma:{}", fmtParams.str, texW, texH,
+		DXGIFormatToString(packedFormat), chromaScaling);
+
+	const bool packed422 = (fmtParams.cformat == CF_YUY2 || fmtParams.cformat == CF_UYVY
+		|| fmtParams.cformat == CF_Y210
+		|| fmtParams.cformat == CF_Y216
+		|| fmtParams.cformat == CF_V210);
+	const bool fix422 = (packed422 && texW * 2 == width);
+
+	std::string code;
+	code += std::format("#define w {}\n", fix422 ? width : texW);
+	code += std::format("#define dx (1.0/{})\n", texW);
+	code += std::format("#define dy (1.0/{})\n", texH);
+	code += std::format("static const float2 wh = {{{}, {}}};\n", fix422 ? width : texW, texH);
+	code += std::format("static const float2 dxdy2 = {{2.0/{}, 2.0/{}}};\n", texW, texH);
+
+	ShaderGetPixels(true, fmtParams, exFmt.VideoChromaSubsampling, chromaScaling, false, packedFormat, code);
+	SampleAtTopLevel(code);
+
+	// color now holds Y, Cb and Cr as the source stores them, 0 to 1 of its own scale.
+	// The video processor reads the studio range as 16/255 to 235/255 of the full
+	// scale whatever the depth, so the code written is the source's value brought to
+	// that scale: the same multiplier for luma and chroma, and nothing else to do.
+	const int maxCode = (packedFormat == DXGI_FORMAT_AYUV) ? 255 : 1023;
+	double srcBlack = 16.0 / 255.0, srcWhite = 235.0 / 255.0;
+	if (fmtParams.CDepth == 10) {
+		srcBlack = 64.0 / 1023.0;
+		srcWhite = 940.0 / 1023.0;
+	} else if (fmtParams.CDepth > 10) {
+		srcBlack = 4096.0 / 65535.0;   // ten bits in the high bits of sixteen
+		srcWhite = 60160.0 / 65535.0;
+	}
+	// A full-range source is handed over as it is: the processor is told so and reads
+	// the whole scale, so there is nothing to stretch.
+	const bool fullrange = (exFmt.NominalRange == DXVA2_NominalRange_0_255);
+	const double scale = fullrange ? maxCode : maxCode * (235.0 - 16.0) / 255.0 / (srcWhite - srcBlack);
+
+	code += std::format("const uint3 q = (uint3)clamp(round(color.rgb * {}), 0, {});\n", scale, maxCode);
+	if (packedFormat == DXGI_FORMAT_AYUV) {
+		// V, U, Y, A through an R8G8B8A8 view, so V is the low byte.
+		code.append("packed[threadId.xy] = q.z | (q.y << 8) | (q.x << 16) | (255u << 24);\n");
+	} else {
+		// Y410: U, Y, V, A through an R10G10B10A2 view.
+		code.append("packed[threadId.xy] = q.y | (q.x << 10) | (q.z << 20) | (3u << 30);\n");
+	}
+	code.append("}\n");
+
+	return CompileShader(code, nullptr, "cs_5_0", ppCode);
 }

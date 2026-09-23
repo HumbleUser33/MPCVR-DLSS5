@@ -115,6 +115,7 @@ void CVRMainPPage::SetControls()
 	SendDlgItemMessageW(IDC_SLIDER2, TBM_SETPOS, 1, m_SetsPP.iSDRDisplayNits / SDR_NITS_STEP);
 	GetDlgItem(IDC_EDIT1).SetWindowTextW(std::to_wstring(m_SetsPP.iSDRDisplayNits).c_str());
 
+	CheckDlgButton(IDC_CHECK27, m_SetsPP.bVPReplaceChroma     ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK6, m_SetsPP.bInterpolateAt50pct   ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK10, m_SetsPP.bUseDither           ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK17, m_SetsPP.bDeintBlend          ? BST_CHECKED : BST_UNCHECKED);
@@ -176,17 +177,26 @@ void CVRMainPPage::EnableControls()
 	// keeps it at the source size and hands the resizing back to the shaders.
 	// DLSS Super Resolution enlarges in its place, so the Upscaling method then only
 	// stands in where it cannot run.
+	// "Replace VP chroma upsampling" gives the chroma of a progressive 4:2:0/4:2:2
+	// picture back to the shaders, and only the chroma: the processor is handed a
+	// 4:4:4 picture and goes on converting and resizing it.
 	// While something plays, the renderer also says what it is really doing with it,
 	// and a list is only greyed when both agree that it has nothing to do: the format
-	// boxes are a rule of thumb, since Dolby Vision, YCgCo and RGB on Nvidia go
-	// through the shaders whatever is ticked.
+	// boxes and that option are a rule of thumb for an idle page, since Dolby Vision,
+	// YCgCo and RGB on Nvidia go through the shaders whatever is ticked, and an
+	// interlaced picture keeps the processor whatever the option says.
 	const bool bAllVPFormats = m_SetsPP.VPFmts.bNV12 && m_SetsPP.VPFmts.bP01x
 		&& m_SetsPP.VPFmts.bYUY2 && m_SetsPP.VPFmts.bOther;
 	const bool bVPAvailable = !(m_SetsPP.bUseD3D11 && !IsWindows8OrGreater()); // no D3D11 VP on Windows 7
 	const bool bDlssPass = m_SetsPP.bUseD3D11 && (m_SetsPP.bDlssNR || m_SetsPP.bDlssSR);
-	const bool bVPConverts = bAllVPFormats && bVPAvailable
+	const bool bChromaToShaders = m_SetsPP.bUseD3D11 && m_SetsPP.bVPReplaceChroma;
+	// The processor can take the picture and still not be the one rebuilding its
+	// chroma: with the option on, the shaders do that before handing it over, and
+	// the chroma list is theirs again while the resizing lists stay its own.
+	const bool bVPTakesPicture = bAllVPFormats && bVPAvailable;
+	const bool bVPConverts = bVPTakesPicture && !bChromaToShaders
 		&& (!m_bRendererActive || (m_uVPUse & VPUSE_Converting));
-	const bool bVPResizes = bVPConverts && m_SetsPP.bVPScaling && !bDlssPass
+	const bool bVPResizes = bVPTakesPicture && m_SetsPP.bVPScaling && !bDlssPass
 		&& (!m_bRendererActive || (m_uVPUse & VPUSE_Resizing));
 
 	const BOOL bChromaList = !bVPConverts;
@@ -200,8 +210,9 @@ void CVRMainPPage::EnableControls()
 	GetDlgItem(IDC_COMBO3).EnableWindow(bDownscalingList);
 	GetDlgItem(IDC_CHECK6).EnableWindow(bUpscalingList || bDownscalingList);
 
-	// Render ahead belongs to the Direct3D 11 processor.
+	// Render ahead and the chroma replacement belong to the Direct3D 11 processor.
 	GetDlgItem(IDC_CHECK26).EnableWindow(m_SetsPP.bUseD3D11);
+	GetDlgItem(IDC_CHECK27).EnableWindow(m_SetsPP.bUseD3D11);
 }
 
 HRESULT CVRMainPPage::OnConnect(IUnknown *pUnk)
@@ -348,20 +359,42 @@ HRESULT CVRMainPPage::OnActivate()
 		L"Available for Direct3D 11.\n"
 		"Requires hardware and driver support:\n"
 		"- Intel Graphics UHD 610 or later\n"
-		"- Nvidia RTX (x64 only)");
+		"- Nvidia RTX (x64 only)\n"
+		"The driver leaves a 4:4:4 picture untouched, so it is not\n"
+		"asked for while \"Replace VP chroma upsampling\" hands one\n"
+		"over, and the statistics then do not claim it.");
 	AddHint(IDC_CHECK19,
 		L"Available for Direct3D 11.\n"
 		"Requires hardware and driver support:\n"
-		"- Nvidia RTX (x64 only)");
+		"- Nvidia RTX (x64 only)\n"
+		"The driver only tone maps an 8-bit or a 4:4:4 picture: on a\n"
+		"10-bit source it does nothing unless \"Replace VP chroma\n"
+		"upsampling\" hands the processor a 4:4:4 one, and the\n"
+		"statistics only claim it where it really applies.");
 	AddHint(IDC_COMBO5,
 		L"Used for YUV 4:2:0/4:2:2 input formats when the video\n"
 		"processor does not convert them: it does its own chroma.\n"
 		"Greyed while the video processor is converting what plays,\n"
-		"and when every format above is ticked; it still stands in\n"
-		"for what the video processor refuses (Dolby Vision, YCgCo,\n"
-		"RGB on Nvidia).\n"
+		"and when every format above is ticked and the box below is\n"
+		"not; it still stands in for what the video processor refuses\n"
+		"(Dolby Vision, YCgCo, RGB on Nvidia).\n"
 		"RAVU-zoom (mpv prescaler on Cb and Cr): Direct3D 11,\n"
 		"4:2:0 only; Catmull-Rom is used elsewhere.");
+	AddHint(IDC_CHECK27,
+		L"Available for Direct3D 11.\n"
+		"The shaders rebuild the chroma of a progressive YUV\n"
+		"4:2:0/4:2:2 picture with the method above and hand the video\n"
+		"processor a 4:4:4 one, so the processor stays in the chain:\n"
+		"RTX Video HDR goes on working, and on a 10-bit source it\n"
+		"starts working, the driver leaving 10-bit 4:2:0 untouched.\n"
+		"The processor's own chroma comes out about bilinear, and on\n"
+		"a 10-bit source it also shifts the colour by about one level;\n"
+		"measured here, this gains 5.6 dB on the colour of a 10-bit\n"
+		"film and 0.6 dB on an 8-bit one.\n"
+		"Interlaced video keeps the processor's chroma, since it alone\n"
+		"deinterlaces, and so do 4:4:4 and RGB, which have no chroma\n"
+		"to rebuild. Super Resolution does not apply to a 4:4:4\n"
+		"picture and is not requested for the ones this moves.");
 	AddHint(IDC_COMBO2,
 		L"Used to increase image size when the\n"
 		"DVXA2/D3D11 Video Processor is not used for resizing.\n"
@@ -512,6 +545,12 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 			if (nID == IDC_CHECK26) {
 				m_SetsPP.bDlssRenderAhead = IsDlgButtonChecked(IDC_CHECK26) == BST_CHECKED;
 				SetDirty();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_CHECK27) {
+				m_SetsPP.bVPReplaceChroma = IsDlgButtonChecked(IDC_CHECK27) == BST_CHECKED;
+				SetDirty();
+				EnableControls(); // the Chroma upsampling list comes back with it
 				return (LRESULT)1;
 			}
 			if (nID == IDC_CHECK18) {

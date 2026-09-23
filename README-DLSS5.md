@@ -201,10 +201,10 @@ repeated pictures (variable frame rates, 25p stored as 50p) handled like the per
 
 ## DLSS Super Resolution (experimental)
 
-**Use DLSS SR 4.5 for upscaling**, on the DLSS page, enlarges the picture with DLSS Super
-Resolution instead of the **Upscaling** method of the main page, which is then greyed. It is
-independent of DLSS 5 NR: another DLL, another session, and it works with NR on or off. When
-NR runs before upscaling, SR takes its output.
+**Use DLSS SR 4.5 for upscaling (Experimental)**, on the DLSS page, enlarges the picture with
+DLSS Super Resolution instead of the **Upscaling** method of the main page, which is then
+greyed. It is independent of DLSS 5 NR: another DLL, another session, and it works with NR on
+or off. When NR runs before upscaling, SR takes its output.
 
 **How it runs.** Unlike the NR snippet, this feature runs on Direct3D 11 through the display
 driver's NGX runtime (`_nvngx.dll`), which loads `nvngx_dlss.dll` itself: no second device,
@@ -218,13 +218,100 @@ is on the path, and `Init_ProjectID` with the documented argument order crashes)
 in the same runtime working, and allows a new one.
 
 **Inputs.** Video has no jitter and no depth: the input is the picture at its own size, the
-depth a constant plane, and the motion vectors come from NVIDIA Optical Flow — lent by the NR
-stabilizer when it runs on the same picture, otherwise from a motion-only estimator at about
-540 lines. A redraw gets no vectors. The quality mode follows the scale (Quality below ×1.6,
-Balanced below ×1.85, Performance below ×2.5, Ultra Performance above) and DLSS picks the
-model for it unless a preset is set: with 310.9.1, **M** at ×2, **L** at ×3, **K** below.
+depth a constant plane, and the motion vectors come from NVIDIA Optical Flow at about 540
+lines, run on the very picture DLSS enlarges — after DLSS 5 NR when that runs — and cleaned up
+as described below. A redraw gets no vectors. The quality mode follows the scale (Quality
+below ×1.6, Balanced below ×1.85, Performance below ×2.5, Ultra Performance above) and DLSS
+picks the model for it unless a preset is set: with 310.9.1, **M** at ×2, **L** at ×3, **K**
+below.
 Past ×4 DLSS stops there and the resize shaders do the rest; where the picture does not grow
 on both axes, or no feature can be made for a size, the Upscaling method runs as before.
+
+**Still backgrounds and the edges.** DLSS resamples its history along the vectors it is given,
+and Optical Flow's raw vectors are wrong on a still, grained picture: most blocks by a fraction
+of a pixel in every direction, some by several pixels, and worst along the frame's edges, where
+a block has no neighbours on one side. A still background shimmered like heat haze, and the
+grain stayed in a band along the edges, where vectors leaving the picture made DLSS drop its
+history. The vectors now go through two passes before DLSS
+(`Shaders/d3d11/cs_dlss_global_motion.hlsl`, then PASS 4 and PASS 3 of `ps_dlss_stabilize.hlsl`,
+`CDlssStabilizer::ForDlssSR`):
+
+- **the picture's global motion**: the median of the blocks that can be trusted — forward and
+  backward flow agree, the match is good, the vector stays in the picture — exact to the
+  engine's 1/32 of a pixel, measured on the GPU with nothing waiting for it. The median of all
+  blocks is not enough: on heavy grain the flat areas, where only the grain changes, give a
+  coherent wrong motion that moved it 0.6 to 4 pixels on four film frames out of six. Under 0.4
+  pixels the global motion counts as none;
+- **each block** keeps a motion of its own only if it lies more than 0.75 to 1.5 pixels from the
+  global motion and the trusted blocks around it share it (see *Moving subjects* below);
+  otherwise it takes the global motion. A block pointing out of the picture where the global
+  motion does not is noise as well.
+
+A still background thus gets exactly no motion, a pan exactly the pan, and what moves on its
+own keeps its vector. `--tsrstill` measures it on six 4K film frames, each halved and grained
+anew on every frame, then enlarged twice: 40 still frames, an object crossing them, a slow pan
+(0.7 pixel a frame) and a pan (3.8 pixels a frame). *Shimmer* is how much the structures of a
+still picture move from one frame to the next, *grain flicker* how much the grain left does,
+both ×1000 on luma; PSNR in dB.
+
+| | Light grain | | | | Old film grain | | | |
+|---|---|---|---|---|---|---|---|---|
+| Vectors | Shimmer | Grain flicker | Slow pan | Pan | Shimmer | Grain flicker | Slow pan | Pan |
+| Raw (up to 1.2) | 1.44 | 1.61 | 48.4 | 48.3 | 3.05 | 3.51 | 42.6 | 42.7 |
+| Snapping alone (first version) | 0.73 | 0.95 | 49.9 | 50.3 | 1.84 | 2.12 | 43.6 | 44.7 |
+| **Now** | **0.74** | **0.92** | **50.2** | **50.3** | **1.81** | **2.13** | **43.9** | **44.9** |
+| Exact (not available in playback) | 0.96 | 1.00 | 53.3 | 53.6 | 1.85 | 1.80 | 44.5 | 47.1 |
+
+The shimmer falls to the level of exact vectors, or under it, and pans gain 1 to 2 dB. Along
+the edges, the raw vectors were off by 8.5 pixels on light grain and 21 pixels on old film grain
+in the outermost 4 pixels, and left 18 to 24 % more grain there than exact ones; now 0.3
+pixel, and 2 to 4 % more grain. With exact vectors DLSS keeps a slight edge effect of its
+own: on one film frame, a 32-pixel guard band — the picture mirrored on every side — took a
+further 7 to 10 % off the grain flicker in the outermost band and left the grain as it was; not
+worth 9 % more DLSS time, so there is none. The filter's passes match the same computed on the
+CPU, on still, panned and zoomed pictures: the global motion exactly, the vectors to their
+texture's precision, 0.016 pixel (`--tsrport`).
+
+**Moving subjects.** What moves on its own kept Optical Flow's vector, and its error with it:
+on a subject crossing a still background, the vectors DLSS got were off by 1.4 pixels (RMS) on
+light grain and 2.2 on old film grain, and under heavy grain the engine also underestimates the
+motion itself, by 0.4 to 0.8 pixel of 2.9, the same way on every block. The subject shimmered
+as a still background did with the raw vectors. PASS 4 now cleans what keeps its own motion,
+one block at a time:
+
+- Optical Flow reads a flow frame boxed a little wider — 4×4 source pixels per flow pixel at
+  1080p instead of 2×2 — which takes grain out of what it matches;
+- each block climbs from its own vector to the motion the trusted blocks around it share: a
+  mean shift over the 7×7 blocks around it, weighted by trust and by closeness to within a
+  pixel, so that the background, a pixel or more away, never joins in. It keeps that motion if
+  at least four blocks' worth of trust, and a tenth to a third of the window's, share it;
+- where the picture has texture, the kept vector is searched again on the two flow frames, in
+  steps of a half, a quarter and an eighth of a flow pixel, which undoes the engine's bias;
+- then it is blended with the vector found one picture earlier where the content came from,
+  when the two agree (0.3 for the new one).
+
+| | Light grain | | | Old film grain | | |
+|---|---|---|---|---|---|---|
+| Vectors | Subject shimmer | Subject PSNR | Pan shimmer | Subject shimmer | Subject PSNR | Pan shimmer |
+| Raw (up to 1.2) | 1.72 | 45.0 | 1.46 | 3.14 | 41.5 | 3.10 |
+| Snapping alone (first version) | 1.78 | 44.8 | 0.73 | 3.20 | 41.7 | 1.35 |
+| **Now** | **0.75** | **46.2** | **0.66** | **2.30** | **42.3** | **1.19** |
+| Exact (not available in playback) | 0.29 | 45.7 | 0.14 | 0.93 | 42.3 | 0.49 |
+
+*Shimmer* is the same measure taken on what moves, against the frame before at the place it
+came from: the subject inside its outline, the pan away from the edge it enters by. The subject
+shimmers 2.4 times less on light grain and 28 % less on old film grain than with the first
+version, its PSNR reaches that of exact vectors, and its vectors are off by 0.9 and 1.8 pixels;
+pans shimmer 10 % less and gain up to 0.3 dB. What it costs: on still pictures under old film
+grain, DLSS keeps 3 % more grain than with the snapping alone (5 % in the outermost 8 pixels)
+and the picture measures 0.3 dB lower; on light grain nothing changes, and the edges come out
+slightly cleaner. A few false motions still survive on flat areas of a still picture, where any
+offset matches. What was tried to take them out — weighing each block's say by its texture,
+checking each kept vector against the frames, requiring the same motion two pictures running,
+asking a larger share of the window — took moving subjects' motion away as well, or cost the
+slow pan under heavy grain, and was left out. Subjects still shimmer more than with exact
+motion, chiefly under heavy grain, where a block of low contrast cannot tell its own motion from
+the grain's: hence *Experimental* on the option.
 
 **Cost** on an RTX 3050 6 GB (`--tsr`, GPU time per frame):
 
@@ -236,7 +323,10 @@ on both axes, or no feature can be made for a size, the Upscaling method runs as
 | 1920×800 → 3840×1600 | Performance, M | 16.3 ms |
 | 1920×1080 → 2560×1440 | Quality, K | 4.2 ms |
 
-Add the Optical Flow vectors, 1.6 to 2.2 ms at 1080p, when NR does not lend them.
+Add the vectors, 3.0 ms at 1080p in playback, and up to about 3.6 ms on a zoom, where every
+block moves its own way and is searched again: Optical Flow both ways with the matching cost,
+then the passes described above. The snapping alone took 2.2 ms; up to 1.2 the raw vectors took
+1.3 ms, and nothing when DLSS 5 NR lent its own; DLSS SR now always makes its own.
 
 **Quality — read this before turning it on.** `--tsrq` pans windows of six 4K film frames by
 half a source pixel per frame, reduces them to the source, grains or compresses them per
@@ -247,18 +337,20 @@ frames (PSNR in dB; *grain* is the fine detail left in flat areas, the source ke
 |---|---|---|---|---|---|
 | Catmull-Rom | **55.9** | **55.9** | 2.40 | **46.9** | **46.8** |
 | Lanczos3 | 54.7 | 54.7 | 2.55 | 46.5 | 46.4 |
-| **DLSS SR, Optical Flow vectors** | 50.6 | 49.7 | **0.73** | 46.2 | 45.5 |
+| **DLSS SR, Optical Flow vectors** | 51.8 | 52.7 | **0.68** | 46.5 | **48.3** |
 | DLSS SR, no vectors | 51.8 | 49.2 | 0.45 | 46.5 | 45.3 |
 | DLSS SR, exact motion (not available in playback) | 51.8 | 54.3 | 0.45 | 46.5 | 49.7 |
 
-With the vectors a player can compute, DLSS SR is **less faithful than Catmull-Rom**: 5 to 6
-dB below on clean film frames, about 1 dB below on compressed ones, and it **removes about
-70 % of the film grain** over time. Without jitter a still picture gives it nothing new, and
-Optical Flow is not precise enough for it to accumulate detail on a pan: finer flow — the
-source size, a vector per pixel, the slowest search — measured no better, and worse on still
-pictures. Only with exact motion does it beat the filters, on compressed moving pictures. The
-option is therefore off by default and marked experimental; your eyes decide whether its
-cleaner look is worth it on your films.
+With the vectors a player can compute, DLSS SR stays **less faithful than Catmull-Rom on
+clean film**, 3 to 4 dB below. On compressed film it is level with it on still pictures, 0.4 dB
+below, and 1.5 dB above on moving ones. It **removes about 70 % of the film grain** over time.
+The cleaned vectors gain 0.3 to 1.2 dB on still pictures and 2.7 to 3.0 dB on moving ones over
+the raw vectors of 1.2 (50.6, 49.7, 0.73, 46.2 and 45.5 on the row above), and remove a little
+more grain. Without jitter a still picture gives DLSS
+nothing new, and Optical Flow is not precise enough for it to accumulate as much detail on a
+pan as exact motion does: finer flow — the source size, a vector per pixel, the slowest search —
+measured no better. The option is therefore off by default and marked experimental; your eyes
+decide whether its cleaner look is worth it on your films.
 
 ---
 
@@ -321,6 +413,60 @@ actually doing: **Chroma upsampling** while the video processor converts, **Upsc
 **Downscaling** while it also resizes (*Use for resizing*, which DLSS 5 NR and DLSS SR suspend
 on their own), and **Upscaling** while DLSS SR enlarges. A list that a Dolby Vision or YCgCo
 picture sends back to the shaders stays available.
+
+**Replace VP chroma upsampling**, under the list, moves that one job to the shaders without
+taking the picture away from the processor. A compute shader reads the planes of a progressive
+4:2:0 or 4:2:2 frame, rebuilds Cb and Cr with the method above, and writes the result back in
+4:4:4 — AYUV on an 8-bit source, Y410 on a 10-bit one — which the processor then converts and
+resizes as it always did. It is the shader video processor's own conversion code, generated as
+a compute shader instead of a pixel shader, so both paths stay the same picture.
+
+Measured on a 4K film frame halved, played as 4:2:0 and as 4:4:4 through the same conversion
+(`playback_test --chroma` and `--chroma10`): PSNR of Cb and Cr over the picture, then next to
+the luma's edges where bleeding shows, and the constant shift of Cb and Cr in 8-bit levels.
+
+| Source | Chroma | Cb/Cr | At luma edges | Colour shift |
+|---|---|---|---|---|
+| 8-bit (NV12) | the video processor | 52.25 | 48.69 | 0.07 level |
+| | **Catmull-Rom before it** | **52.86** | **49.60** | **0.07 level** |
+| | **RAVU-zoom before it** | **53.30** | **50.18** | **0.10 level** |
+| | Catmull-Rom, shaders alone | 53.38 | 50.05 | 0.02 level |
+| 10-bit (P010) | the video processor | 49.60 | 47.76 | 0.68 level |
+| | **Catmull-Rom before it** | **55.24** | **51.68** | **0.05 level** |
+| | **RAVU-zoom before it** | **55.96** | **52.75** | **0.08 level** |
+| | Catmull-Rom, shaders alone | 55.71 | 51.85 | 0.01 level |
+
+The processor's own chroma comes out between Nearest and Bilinear. On a 10-bit source it also
+shifts the colour by about seven tenths of a level: its driver reads the studio range as
+16/255 to 235/255 whatever the depth, while a 10-bit signal runs from 64/1023 to 940/1023. The
+shaders read it at its own scale and write the 4:4:4 picture back on the scale the driver
+expects, so that shift goes away as well — worth more here than the chroma itself. What is
+left between the pre-pass and the shaders alone is the 8- or 10-bit picture handed over.
+
+The processor keeps the picture, so what only it can do keeps applying, with one change each
+way (`tools/dlssnr_probe` `vp444_probe`, which measures how much enabling an extension changes
+the picture, in 8-bit levels):
+
+- **RTX Video HDR** goes on working, and on a 10-bit source it starts working: the driver
+  leaves a 10-bit 4:2:0 picture untouched (0.000) and tone maps the same frame in 4:4:4 as it
+  does an 8-bit one (37.7 against 37.9). The filter therefore stops asking for it on a 10-bit
+  4:2:0 picture, where it never did anything, and the statistics no longer claim it. On a
+  10-bit film the box is thus what gives RTX Video HDR something to work on: untick it and the
+  HDR line loses it, tick it again and it comes straight back, with the film still playing;
+- **Super Resolution** does nothing to a 4:4:4 picture (0.000, against 4.0 on 4:2:0), so it is
+  not requested for the pictures this moves and the statistics do not claim it either;
+- **deinterlacing** works on NV12 only on this driver, so interlaced video keeps the
+  processor's own chroma; 4:4:4 and RGB sources have no chroma to rebuild and are left alone;
+- **HDR passthrough** is unaffected: the processor answers that it converts a PQ picture in
+  AYUV, Y410 or Y416 to PQ RGB just as it does one in NV12 or P010 (`vp444_probe --hdrconv`).
+
+The statistics say which is happening, and why when the option does not apply:
+
+    VideoProcessor: D3D11 VP, output to R10G10B10A2_UNORM, chroma by shaders: Catmull-Rom
+    VideoProcessor: D3D11 VP, output to B8G8R8A8_UNORM, converts chroma (interlaced)
+
+The box needs Direct3D 11 and costs the chroma pass, a few tenths of a millisecond at 1080p
+(RAVU-zoom, which enlarges Cb and Cr through its own shader first, costs about 3 ms).
 
 Render ahead (below) covers them as well: with FSRCNNX 16 a 4K picture takes more than the 8 ms
 the renderer allows itself, and without it the picture would reach the screen late.
@@ -411,7 +557,7 @@ it serves the luma prescalers as much as DLSS, so it sits on the **Settings** pa
 | Motion | NVIDIA Optical Flow | Or *Shader detector (still areas)*. Applies on the next picture |
 | Send the motion vectors to DLSS | off | Optical Flow only. Steadier, but the network renders differently around moving objects |
 | Disable temporal history | off | Forces `DLSSNR.Reset` every frame. The stabilizer is not affected |
-| Use DLSS SR 4.5 for upscaling | off | Experimental, see above. Greys the main page's Upscaling list while it is on |
+| Use DLSS SR 4.5 for upscaling (Experimental) | off | See above: not perfect yet. Greys the main page's Upscaling list while it is on |
 | Preset (DLSS SR) | Automatic | Or J, K, L, M. Applies on the next picture |
 | DLL (DLSS SR) | empty | `nvngx_dlss.dll` or its folder. Empty means search next to the filter and up |
 
@@ -420,6 +566,12 @@ On the **Settings** page, bottom right:
 | Setting | Default | Notes |
 |---|---|---|
 | Render ahead to keep audio sync | on | See above. Used while DLSS 5 NR, DLSS SR or a luma prescaler runs. Needs Direct3D 11 |
+
+And in the **Shader video processor** box, under the Chroma upsampling list:
+
+| Setting | Default | Notes |
+|---|---|---|
+| Replace VP chroma upsampling | off | See above. The shaders rebuild the chroma of a progressive YUV 4:2:0/4:2:2 picture with the Chroma upsampling method and hand the video processor a 4:4:4 one, so RTX Video HDR goes on working and starts working on 10-bit sources. Interlaced video keeps the processor's chroma, and Super Resolution does not apply to 4:4:4. Needs Direct3D 11 |
 
 **Default** on the DLSS page resets the tuning, from Style to Disable temporal history, motion
 settings and the DLSS SR preset; it leaves Enable, Use DLSS SR, the key, both DLL paths and
@@ -454,6 +606,16 @@ at 2160p, plus what the Optical Flow engine allocates.
 **Cost.** Two CPU stalls per frame for the cross-device synchronisation, plus the network
 itself and the stabilizer. Fine for video framerates; this is not a low-latency design. Render
 ahead keeps pictures on time as long as a picture takes less than about a frame.
+
+**Settings change while the film plays.** They all take effect on the picture that follows,
+with no restart: the formats the processor may take, RTX Video HDR, Super Resolution, the
+chroma of the list and the box that moves it. One case used to freeze the picture with the
+sound still running -- anything that stopped HDR output, RTX Video HDR unticked first among
+them -- and it was not what it looked like: HDR output needs the modern presentation model,
+*Swap effect: Discard* asks for the older one, and Windows never takes a window back to it.
+The swap chain then presented every picture, in time and without error, while the screen kept
+the last one. A window that has carried the flip model now keeps it, which shows everything
+the old model showed. `playback_test --toggle` watches the desktop itself for exactly this.
 
 ---
 
@@ -504,6 +666,8 @@ dlssnr_harness.exe --tstabbench   what the stabilizer costs at 1080p and 2160p
 dlssnr_harness.exe --tpipeline    the whole DLSS chain as the renderer runs it: CPU and GPU time per stage
 dlssnr_harness.exe --tsr          DLSS Super Resolution: bring-up, presets, scales, costs, NR next to it
 dlssnr_harness.exe --tsrq         DLSS SR against the resize shaders on moving film frames
+dlssnr_harness.exe --tsrstill     DLSS SR on still, grained pictures: shimmer, grain along the edges, moving subjects
+dlssnr_harness.exe --tsrport      DLSS SR's vectors from the filter against the same made on the CPU, and their GPU time
 dlssnr_harness.exe --tupscale     the resize shaders and the mpv prescalers on film frames
 dlssnr_harness.exe --tupscalecost what EfRLFN costs at film sizes
 dlssnr_harness.exe --tchroma      the chroma upsamplers on 4:2:0 made from film frames
@@ -513,9 +677,10 @@ dlssnr_harness.exe --tmpvport     the filter's prescaler runner against the harn
 `--tframes N` sets the frames per run; `--tstrong` uses the strongest network settings;
 `--timage <file>` picks the photo for `--teffect`, `--tflow` and `--tstab` (a Windows 11
 wallpaper by default). `--nonr` skips the DLSS 5 NR session for the suites that do not need
-it, `--srdll <path>` points at `nvngx_dlss.dll`, and `--srrefs N` limits `--tsrq` to the
-first N references. `--tupscale`, `--tchroma`, `--tmpvport` and `--tsrq` read 4K film frames
-from `tools/dlssnr_probe/upscale_refs/`. `--tupscale` also runs the mpv shaders it finds
+it, `--srdll <path>` points at `nvngx_dlss.dll`, and `--srrefs N` limits `--tsrq`,
+`--tsrstill` and `--tsrport` to the first N references. `--tupscale`, `--tchroma`,
+`--tmpvport` and the three DLSS SR suites read 4K film frames from
+`tools/dlssnr_probe/upscale_refs/`. `--tupscale` also runs the mpv shaders it finds
 translated under `tools/dlssnr_probe/upscalers/hlsl/` (`Shaders/mpv/mpv_shaders.py` puts them
 there); the three the filter embeds need nothing but the build.
 
@@ -525,6 +690,24 @@ film frames (`--tupscale`).
 
 **`vp_rebuild_test.exe`** — checks that rebuilding the hardware video processor keeps the
 picture, which is what used to show a green frame when DLSS was toggled while paused.
+
+**`shader444_test.exe`** — compiles the chroma pass the filter generates for *Replace VP chroma
+upsampling*, for each source format and each chroma method, since a compute shader has rules a
+pixel shader has not. One that does not compile leaves the picture to the video processor
+without a word, so nothing on screen says it happened.
+
+**`vp444_probe.exe`** — asks the driver, through the renderer's own `CD3D11VP`, what the
+video processor really does with each input format: which it takes, how its conversion
+compares, and how much enabling Super Resolution, RTX Video HDR or deinterlacing changes the
+picture, for 4:2:0 and 4:4:4 alike. `--film` runs it on film frames, `--pack` checks the
+packing into AYUV and Y410 is exact, `--views` which bind flags still make an input view, and
+`--hdrconv` which conversions the processor declares. The numbers quoted in the chroma section
+above come from it.
+
+**`freeze_dump.exe`** — run against a player that hangs (by name, by process id, or with no
+argument at all), it asks Windows what every thread is waiting for, names any cycle as the
+deadlock it is, and walks each stack with the filter's own names, from the pdb beside its .ax.
+It reads and changes nothing, and writes `freeze_dump.txt` beside itself.
 
 **`playback_test.exe`** — plays a synthetic film through the built x64 filter
 (`_bin\Filter_x64\MpcVideoRenderer64.ax`) in a DirectShow graph, in a window, on the system
@@ -542,7 +725,26 @@ statistics drawn over it, as `scalers_<n>_stats.bmp`, which is how the overlay's
 
 `--mainpage` and `--dlsspage` show a property page of the built filter for a few seconds and
 save it as `proppage.bmp`, without a player; `--click <id>` then clicks one control and saves
-the page again as `proppage_clicked.bmp`, which is how the greying is checked. The program
+the page again as `proppage_clicked.bmp`, which is how the greying is checked. `--chroma`
+plays one picture, a 4K film frame halved, as 4:2:0 and as 4:4:4 at its own size, and
+measures what each chroma upsampler rebuilds against the 4:4:4 one: the hardware video
+processor comes out between Nearest and Bilinear, 1.7 dB under Catmull-Rom along luma
+edges.
+
+`--toggle` changes one setting at a time while the film plays, from the thread that owns the
+window as the player does, and checks three things: that the call comes back, that the
+renderer goes on drawing, and that **the screen itself keeps moving**. The last one is not the
+same as the others: a swap chain can present picture after picture, in time and without error,
+into a window the desktop no longer updates, and nothing inside the filter can see it. The
+suite watches the desktop through the duplication API, which shows what Windows really
+composes. A call that does not come back in time prints every thread's stack and what each is
+waiting for. `--gpu` sends the pictures as D3D11 textures, the way a hardware decoder does,
+which makes the renderer run on the decoder's device; `--hdr` asks for HDR passthrough, which
+only means something while the desktop is already in HDR, and never switches the display
+itself; `--switch` walks the video processor's own extras -- RTX Video HDR, Super Resolution --
+as the chroma moves to the shaders and back; `--file <path> [--seek <seconds>]` plays a real
+film through LAV Splitter and LAV Video, the ones the installed player carries, with the sound
+rendered silently so the graph is clocked as the player clocks it. The program
 carries a Windows 10 manifest, without which the version helpers answer 6.2 and the pages grey
 what the player would not; it turns HDR passthrough off for its runs in exchange, since the
 filter may then switch the display's own HDR state, which is not what is being measured.
@@ -552,6 +754,12 @@ playback_test.exe [--seconds 20] [--size 800x450] [--window 1280x720] [--fps 23.
 playback_test.exe --scalers       each Upscaling and Chroma upsampling method (--vp: hardware)
 playback_test.exe --dlsspage 10   shows the filter's DLSS page for 10 s instead
 playback_test.exe --mainpage 10   the same for the Settings page, --click <id> clicks one control
+playback_test.exe --chroma <png>  each chroma upsampler, the hardware one included, against 4:4:4
+playback_test.exe --chroma10 <png> the same in 10 bits: P010 against Y410 (--interlaced: who converts)
+playback_test.exe --toggle       each setting changed in full playback, as the player does
+playback_test.exe --toggle --gpu --hdr --switch   as a hardware decoder feeds it, in HDR
+playback_test.exe --toggle --file <mkv> --seek 1740   a real film, split and decoded
+playback_test.exe --filter <ax>   any of the above with another build of the x64 filter
 ```
 
 ---

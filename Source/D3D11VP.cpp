@@ -409,7 +409,7 @@ void CD3D11VP::ReleaseVideoProcessor()
 	ResetFrameOrder();
 }
 
-HRESULT CD3D11VP::InitInputTextures(ID3D11Device* pDevice)
+HRESULT CD3D11VP::InitInputTextures(ID3D11Device* pDevice, const bool bShaderWritable)
 {
 	UINT referenceFrames = 1 + m_RateConvCaps.PastFrames;
 	if (m_bUseFutureFrames) {
@@ -423,8 +423,20 @@ HRESULT CD3D11VP::InitInputTextures(ID3D11Device* pDevice)
 	for (UINT i = 0; i < m_VideoTextures.Size(); i++) {
 		ID3D11Texture2D** ppTexture = m_VideoTextures.GetTexture(i);
 		D3D11_TEXTURE2D_DESC texdesc = CreateTex2DDesc(m_srcFormat, m_srcWidth, m_srcHeight, Tex2D_Default);
+		if (bShaderWritable) {
+			// AYUV and Y410 have no render target view, so the chroma pass writes them
+			// through an unordered access one, as R32_UINT: both are 32 bits a pixel.
+			texdesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		}
 
 		hr = pDevice->CreateTexture2D(&texdesc, nullptr, ppTexture);
+		if (S_OK == hr && bShaderWritable) {
+			D3D11_UNORDERED_ACCESS_VIEW_DESC uavdesc = {};
+			uavdesc.Format = DXGI_FORMAT_R32_UINT;
+			uavdesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+			hr = pDevice->CreateUnorderedAccessView(*ppTexture, &uavdesc, m_VideoTextures.GetUav(i));
+			DLogIf(FAILED(hr), L"CD3D11VP::InitInputTextures() : CreateUnorderedAccessView() failed with error {}", HR2Str(hr));
+		}
 		if (S_OK == hr) {
 			D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDesc = {};
 			inputViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;

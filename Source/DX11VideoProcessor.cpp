@@ -433,6 +433,7 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_bVPScaling           = config.bVPScaling;
 	m_iVPSuperRes          = config.iVPSuperRes;
 	m_bVPRTXVideoHDR       = config.bVPRTXVideoHDR;
+	m_bVPReplaceChroma     = config.bVPReplaceChroma;
 	m_iChromaScaling       = config.iChromaScaling;
 	m_iUpscaling           = config.iUpscaling;
 	m_iDownscaling         = config.iDownscaling;
@@ -1600,6 +1601,16 @@ HRESULT CDX11VideoProcessor::InitSwapChain(bool bWindowChanged)
 	const auto b10BitOutput = bHdrOutput || Preferred10BitOutput();
 	m_SwapChainFmt = b10BitOutput ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
 
+	// HDR output needs the flip model, and Windows never takes a window back from it:
+	// a swap chain made the old way on a window that has carried a flip one presents
+	// picture after picture without error while the screen keeps the last flip
+	// picture. That was the frozen picture, sound still running, when HDR output
+	// stopped in full playback -- unticking RTX Video HDR, or anything that took it
+	// away. So a window that has had the flip model keeps it: it shows everything the
+	// old model showed (tools/dlssnr_probe: playback_test --toggle --gpu --hdr).
+	const bool bFlipModel = (m_iSwapEffect == SWAPEFFECT_Flip && IsWindows8OrGreater())
+		|| bHdrOutput || m_hWndFlipModel == m_hWnd;
+
 	HRESULT hr = S_OK;
 	DXGI_SWAP_CHAIN_DESC1 desc1 = {};
 
@@ -1614,7 +1625,7 @@ HRESULT CDX11VideoProcessor::InitSwapChain(bool bWindowChanged)
 		desc1.SampleDesc.Count = 1;
 		desc1.SampleDesc.Quality = 0;
 		desc1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		if ((m_iSwapEffect == SWAPEFFECT_Flip && IsWindows8OrGreater()) || bHdrOutput) {
+		if (bFlipModel) {
 			desc1.BufferCount = bHdrOutput ? 6 : 2;
 			desc1.Scaling = DXGI_SCALING_NONE;
 			desc1.SwapEffect = IsWindows10OrGreater() ? DXGI_SWAP_EFFECT_FLIP_DISCARD : DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
@@ -1643,7 +1654,7 @@ HRESULT CDX11VideoProcessor::InitSwapChain(bool bWindowChanged)
 		desc1.SampleDesc.Count = 1;
 		desc1.SampleDesc.Quality = 0;
 		desc1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		if ((m_iSwapEffect == SWAPEFFECT_Flip && IsWindows8OrGreater()) || bHdrOutput) {
+		if (bFlipModel) {
 			desc1.BufferCount = bHdrOutput ? 6 : 2;
 			desc1.Scaling = DXGI_SCALING_NONE;
 			desc1.SwapEffect = IsWindows10OrGreater() ? DXGI_SWAP_EFFECT_FLIP_DISCARD : DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
@@ -1664,6 +1675,9 @@ HRESULT CDX11VideoProcessor::InitSwapChain(bool bWindowChanged)
 	}
 
 	if (m_pDXGISwapChain1) {
+		if (bFlipModel) {
+			m_hWndFlipModel = m_hWnd;
+		}
 		m_UsedSwapEffect = desc1.SwapEffect;
 
 		HRESULT hr2 = m_pDXGISwapChain1->GetContainingOutput(&m_pDXGIOutput);
@@ -1958,6 +1972,10 @@ BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 		// D3D11 VP does not work correctly if RGB32 with odd frame width (source or target) on Nvidia adapters
 		disableD3D11VP = true;
 	}
+	// Where the user asked for it, the shaders rebuild the chroma and the processor
+	// still takes the picture, in 4:4:4. Read here, so that it means "the option
+	// applies to this picture" and not "the processor was not going to take it".
+	m_bChromaReplacedVP = !disableD3D11VP && ChromaToShaders(FmtParams, m_bInterlaced);
 	if (disableD3D11VP) {
 		FmtParams.VP11Format = DXGI_FORMAT_UNKNOWN;
 	}
@@ -2081,19 +2099,45 @@ BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 	return FALSE;
 }
 
+// The video processor's own chroma upsampling lands between Nearest and Bilinear, a
+// decibel under Catmull-Rom on the colour along luma edges, and on a 10-bit source the
+// driver reads the studio range as 16/255..235/255 whatever the depth, which shifts the
+// colour by about six tenths of a level -- worth five decibels more than the chroma
+// itself (tools/dlssnr_probe playback_test --chroma, --chroma10). So "Replace VP chroma
+// upsampling" has a compute shader rebuild the chroma and hand the processor a 4:4:4
+// picture, which it then converts with nothing left to reconstruct: RTX Video HDR and
+// everything else it does still apply. Only an interlaced source keeps its own chroma:
+// this driver deinterlaces NV12 alone, and 4:4:4 would come out woven.
+bool CDX11VideoProcessor::ChromaToShaders(const FmtConvParams_t& params, const bool interlaced)
+{
+	return m_bVPReplaceChroma && !interlaced
+		&& (params.Subsampling == 420 || params.Subsampling == 422)
+		&& params.VP11Format != DXGI_FORMAT_UNKNOWN && params.DX11Format != DXGI_FORMAT_UNKNOWN
+		&& params.pDX11Planes;
+}
+
 HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, const UINT width, const UINT height, const CMediaType* pmt)
 {
 	if (!m_D3D11VP.IsVideoDeviceOk()) {
 		return E_ABORT;
 	}
 
-	const auto& dxgiFormat = params.VP11Format;
+	// With its chroma rebuilt first, the processor reads a 4:4:4 picture: AYUV holds
+	// eight bits a sample, Y410 ten, and both are 32 bits a pixel.
+	m_VPInputFmt = m_bChromaReplacedVP
+		? (params.CDepth > 8 ? DXGI_FORMAT_Y410 : DXGI_FORMAT_AYUV)
+		: params.VP11Format;
+	const auto& dxgiFormat = m_VPInputFmt;
 
 	DLog(L"CDX11VideoProcessor::InitializeD3D11VP() started with input surface: {}, {} x {}", DXGIFormatToString(dxgiFormat), width, height);
 
 	m_TexSrcVideo.Release();
 
-	const bool bHdrPassthrough = m_bHdrDisplayModeEnabled && (SourceIsHDR10orHLG() || (m_bVPUseRTXVideoHDR && params.CDepth == 8));
+	// RTX Video HDR tone maps what the processor reads, and the driver only does it on
+	// an 8-bit picture or a 4:4:4 one: a 10-bit 4:2:0 frame comes back untouched, the
+	// same frame rebuilt in 4:4:4 does not (tools/dlssnr_probe vp444_probe).
+	const bool bRTXVideoHDRInput = params.CDepth == 8 || m_bChromaReplacedVP;
+	const bool bHdrPassthrough = m_bHdrDisplayModeEnabled && (SourceIsHDR10orHLG() || (m_bVPUseRTXVideoHDR && bRTXVideoHDRInput));
 	m_D3D11OutputFmt = m_InternalTexFmt;
 	const int deinterlacing = m_bInterlaced ? m_iVPDeinterlacing : DEINT_Disable;
 	HRESULT hr = m_D3D11VP.InitVideoProcessor(dxgiFormat, width, height, m_srcExFmt, deinterlacing, bHdrPassthrough, m_D3D11OutputFmt);
@@ -2102,16 +2146,19 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 		return hr;
 	}
 
-	hr = m_D3D11VP.InitInputTextures(m_pDevice);
+	hr = m_D3D11VP.InitInputTextures(m_pDevice, m_bChromaReplacedVP);
 	if (FAILED(hr)) {
 		DLog(L"CDX11VideoProcessor::InitializeD3D11VP() : InitInputTextures() failed with error {}", HR2Str(hr));
 		return hr;
 	}
 
-	auto superRes = (m_bVPScaling && (params.CDepth == 8 || !m_bACMEnabled)) ? m_iVPSuperRes : SUPERRES_Disable;
+	// Super Resolution only works on a subsampled picture: on this driver a 4:4:4 one
+	// comes out of it unchanged, so it is not asked for and the statistics do not
+	// claim it (tools/dlssnr_probe vp444_probe).
+	auto superRes = (m_bVPScaling && !m_bChromaReplacedVP && (params.CDepth == 8 || !m_bACMEnabled)) ? m_iVPSuperRes : SUPERRES_Disable;
 	m_bVPUseSuperRes = (m_D3D11VP.SetSuperRes(superRes) == S_OK);
 
-	auto rtxHDR = m_bVPRTXVideoHDR && m_bHdrPassthroughSupport && m_bHdrPassthrough && m_iTexFormat != TEXFMT_8INT && !SourceIsHDR();
+	auto rtxHDR = m_bVPRTXVideoHDR && bRTXVideoHDRInput && m_bHdrPassthroughSupport && m_bHdrPassthrough && m_iTexFormat != TEXFMT_8INT && !SourceIsHDR();
 	m_bVPUseRTXVideoHDR = (m_D3D11VP.SetRTXVideoHDR(rtxHDR) == S_OK);
 
 	if ((m_bVPUseRTXVideoHDR && !m_pDXGISwapChain4)
@@ -2121,7 +2168,11 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 		return S_OK;
 	}
 
-	hr = m_TexSrcVideo.Create(m_pDevice, dxgiFormat, width, height, Tex2D_DynamicShaderWriteNoSRV);
+	// The chroma pass reads the picture plane by plane, as the shader processor does;
+	// without it the processor takes the frame as it comes.
+	hr = m_bChromaReplacedVP
+		? m_TexSrcVideo.CreateEx(m_pDevice, params.DX11Format, params.pDX11Planes, width, height, Tex2D_DynamicShaderWrite)
+		: m_TexSrcVideo.Create(m_pDevice, params.VP11Format, width, height, Tex2D_DynamicShaderWriteNoSRV);
 	if (FAILED(hr)) {
 		DLog(L"CDX11VideoProcessor::InitializeD3D11VP() : m_TexSrcVideo.Create() failed with error {}", HR2Str(hr));
 		return hr;
@@ -2130,12 +2181,75 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 	m_srcWidth       = width;
 	m_srcHeight      = height;
 	m_srcParams      = params;
-	m_srcDXGIFormat  = dxgiFormat;
-	m_pCopyPlaneFn   = GetCopyPlaneFunction(params, VP_D3D11);
+	m_srcDXGIFormat  = params.VP11Format;   // what the decoder hands over, whatever the processor reads
+	m_pCopyPlaneFn   = GetCopyPlaneFunction(params, m_bChromaReplacedVP ? VP_D3D11_SHADER : VP_D3D11);
+
+	if (m_bChromaReplacedVP) {
+		hr = UpdateConvertTo444Shader();
+		if (FAILED(hr)) {
+			DLog(L"CDX11VideoProcessor::InitializeD3D11VP() : UpdateConvertTo444Shader() failed with error {}", HR2Str(hr));
+			return hr;
+		}
+	}
 
 	DLog(L"CDX11VideoProcessor::InitializeD3D11VP() completed successfully");
 
 	return S_OK;
+}
+
+// The compute shader that rebuilds the chroma with the chosen method and writes the
+// picture the video processor reads, in 4:4:4.
+HRESULT CDX11VideoProcessor::UpdateConvertTo444Shader()
+{
+	m_pCSConvertTo444.Release();
+
+	// RAVU-zoom where it runs, Catmull-Rom in its place elsewhere, as in the shader
+	// video processor.
+	UpdateMpvChroma();
+	const int chromaScaling = m_bMpvChromaActive ? CHROMA_RAVU
+		: (m_iChromaScaling == CHROMA_RAVU) ? CHROMA_CatmullRom : m_iChromaScaling;
+
+	ID3DBlob* pShaderCode = nullptr;
+	HRESULT hr = GetShaderConvertTo444(m_srcWidth, m_TexSrcVideo.desc.Width, m_TexSrcVideo.desc.Height,
+		m_srcParams, m_srcExFmt, chromaScaling, m_VPInputFmt, &pShaderCode);
+	if (S_OK == hr) {
+		hr = m_pDevice->CreateComputeShader(pShaderCode->GetBufferPointer(), pShaderCode->GetBufferSize(), nullptr, &m_pCSConvertTo444);
+		pShaderCode->Release();
+	}
+	DLogIf(FAILED(hr), L"CDX11VideoProcessor::UpdateConvertTo444Shader() failed with error {}", HR2Str(hr));
+
+	return hr;
+}
+
+// One thread per pixel, from the planes to the processor's own texture.
+void CDX11VideoProcessor::ConvertTo444Pass(ID3D11UnorderedAccessView* pUav)
+{
+	if (!m_pCSConvertTo444 || !pUav) {
+		return;
+	}
+	if (m_bMpvChromaActive) {
+		MpvChromaPass();   // RAVU-zoom brings Cb and Cr to the luma size first
+	}
+
+	ID3D11ShaderResourceView* srvs[3] = {
+		m_TexSrcVideo.pShaderResource,
+		m_bMpvChromaActive ? m_TexMpvChromaOut[0].pShaderResource.p : m_TexSrcVideo.pShaderResource2.p,
+		m_bMpvChromaActive ? m_TexMpvChromaOut[1].pShaderResource.p : m_TexSrcVideo.pShaderResource3.p
+	};
+	ID3D11SamplerState* samplers[2] = { m_pSamplerPoint, m_pSamplerLinear };
+	ID3D11UnorderedAccessView* uavs[1] = { pUav };
+
+	m_pDeviceContext->CSSetShader(m_pCSConvertTo444, nullptr, 0);
+	m_pDeviceContext->CSSetShaderResources(0, 3, srvs);
+	m_pDeviceContext->CSSetSamplers(0, 2, samplers);
+	m_pDeviceContext->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+	m_pDeviceContext->Dispatch((m_srcWidth + 7) / 8, (m_srcHeight + 7) / 8, 1);
+
+	ID3D11ShaderResourceView* none[3] = {};
+	ID3D11UnorderedAccessView* noUav[1] = {};
+	m_pDeviceContext->CSSetShaderResources(0, 3, none);
+	m_pDeviceContext->CSSetUnorderedAccessViews(0, 1, noUav, nullptr);
+	m_pDeviceContext->CSSetShader(nullptr, nullptr, 0);
 }
 
 HRESULT CDX11VideoProcessor::InitializeTexVP(const FmtConvParams_t& params, const UINT width, const UINT height)
@@ -2285,6 +2399,8 @@ HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 
 	// always Render(1) a frame after CopySample()
 	hr = Render(1, rtStart);
+	if (FAILED(hr)) {
+	}
 	m_pFilter->m_DrawStats.Add(GetPreciseTick());
 	if (m_pFilter->m_filterState == State_Running) {
 		m_pFilter->StreamTime(rtClock);
@@ -2326,6 +2442,8 @@ HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 
 HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 {
+	if (!m_pDXGISwapChain1) {
+	}
 	CheckPointer(m_pDXGISwapChain1, E_FAIL);
 
 	uint64_t tick = GetPreciseTick();
@@ -2656,6 +2774,18 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 			updateStats = true;
 		}
 
+		if (m_bChromaReplacedVP && m_D3D11VP.IsReady() && m_TexSrcVideo.desc.Usage == D3D11_USAGE_DYNAMIC) {
+			// The frame arrives in the decoder's own texture and is copied into this
+			// one, which the chroma pass then reads. A dynamic texture, the one a
+			// frame from memory is mapped into, cannot take a copy.
+			hr = m_TexSrcVideo.CreateEx(m_pDevice, m_srcParams.DX11Format, m_srcParams.pDX11Planes,
+				m_srcWidth, m_srcHeight, Tex2D_DefaultShader);
+			if (FAILED(hr)) {
+				DLog(L"CDX11VideoProcessor::CopySample() : m_TexSrcVideo.CreateEx() failed with error {}", HR2Str(hr));
+				return hr;
+			}
+		}
+
 		CComQIPtr<ID3D11Texture2D> pD3D11Texture2D;
 		UINT ArraySlice = 0;
 		hr = pMSD3D11->GetD3D11Texture(0, &pD3D11Texture2D, &ArraySlice);
@@ -2685,7 +2815,14 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 		}
 #endif
 
-		if (m_D3D11VP.IsReady()) {
+		if (m_D3D11VP.IsReady() && m_bChromaReplacedVP) {
+			// The chroma pass reads the planes, so the frame leaves the decoder's own
+			// texture and is written back in 4:4:4 into the processor's.
+			D3D11_BOX srcBox = { 0, 0, 0, m_srcWidth, m_srcHeight, 1 };
+			m_pDeviceContext->CopySubresourceRegion(m_TexSrcVideo.pTexture, 0, 0, 0, 0, pD3D11Texture2D, ArraySlice, &srcBox);
+			m_D3D11VP.GetNextInputTexture(m_SampleFormat);
+			ConvertTo444Pass(m_D3D11VP.GetInputUav());
+		} else if (m_D3D11VP.IsReady()) {
 			m_D3D11VP.SetInputVideoData(pD3D11Texture2D, pSample, ArraySlice, m_SampleFormat);
 		} else {
 			// here should be used CopySubresourceRegion instead of CopyResource
@@ -2699,6 +2836,17 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 			updateStats = true;
 		}
 
+		if (m_bChromaReplacedVP && m_TexSrcVideo.pTexture && m_TexSrcVideo.desc.Usage != D3D11_USAGE_DYNAMIC) {
+			// A frame from memory is mapped into this texture, so it goes back to
+			// dynamic, whatever a decoder texture made of it before.
+			hr = m_TexSrcVideo.CreateEx(m_pDevice, m_srcParams.DX11Format, m_srcParams.pDX11Planes,
+				m_srcWidth, m_srcHeight, Tex2D_DynamicShaderWrite);
+			if (FAILED(hr)) {
+				DLog(L"CDX11VideoProcessor::CopySample() : m_TexSrcVideo.CreateEx() failed with error {}", HR2Str(hr));
+				return hr;
+			}
+		}
+
 		BYTE* data = nullptr;
 		const int size = pSample->GetActualDataLength();
 		if (size >= abs(m_srcPitch) * (int)m_srcLines && S_OK == pSample->GetPointer(&data)) {
@@ -2707,7 +2855,12 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 			hr = MemCopyToTexSrcVideo(data, m_srcPitch);
 			if (m_D3D11VP.IsReady()) {
 				// ID3D11VideoProcessor does not use textures with D3D11_CPU_ACCESS_WRITE flag
-				m_pDeviceContext->CopyResource(m_D3D11VP.GetNextInputTexture(m_SampleFormat), m_TexSrcVideo.pTexture);
+				ID3D11Texture2D* pInput = m_D3D11VP.GetNextInputTexture(m_SampleFormat);
+				if (m_bChromaReplacedVP) {
+					ConvertTo444Pass(m_D3D11VP.GetInputUav());
+				} else {
+					m_pDeviceContext->CopyResource(pInput, m_TexSrcVideo.pTexture);
+				}
 			}
 		}
 	}
@@ -4066,38 +4219,30 @@ HRESULT CDX11VideoProcessor::DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSr
 	}
 
 	// Motion only for a new picture: a redraw shows the same one, which has not
-	// moved. DLSS 5 NR's Optical Flow vectors are lent when they describe this very
-	// picture at this size; otherwise a motion-only estimator of its own runs.
+	// moved. Optical Flow of its own, about 540 lines, on the very picture DLSS
+	// enlarges -- after DLSS 5 NR when that runs, so on a cleaner one -- each block
+	// drawn to the picture's global motion where it lies within the noise of it
+	// (CDlssStabilizer::ForDlssSR): a still background gets exactly no motion, a pan
+	// the pan. DLSS 5 NR's raw vectors are no longer lent: they made still
+	// backgrounds shimmer and left the grain along the frame's edges (--tsrstill).
+	// Finer flow -- the source size, a vector per pixel, the slowest search --
+	// measured no better (--tsrq).
 	std::wstring motion = L"no vectors";
 	ID3D11Texture2D* pMotion = nullptr;
 	const bool bNewPicture = m_bDlssSRNewPicture;
 	m_bDlssSRNewPicture = false;
 	if (bNewPicture) {
-		ID3D11Texture2D* pLent = (m_bDlssNRActive && !m_bDlssNRAfterUpscale && m_DlssStabilizer.IsCreated()
-			&& m_TexDlssIn.desc.Width == inW && m_TexDlssIn.desc.Height == inH) ? m_DlssStabilizer.GetMotionVectors() : nullptr;
-		if (pLent) {
-			m_DlssSRMotion.Release();
-			pMotion = pLent;
-			motion = L"OF from DLSS 5 NR";
-		} else {
-			// The stabilizer's own flow, about 540 lines: finer flow -- the source
-			// size, a vector per pixel, the slowest search -- measured no better for
-			// DLSS in --tsrq. DLSS does not read the confidence map, so no backward
-			// flow and no cost.
-			CDlssStabilizer::FlowSettings flow;
-			flow.bidirectional = false;
-			flow.cost          = false;
-			if (!m_DlssSRMotion.Matches(inW, inH, CDlssStabilizer::Motion::OpticalFlow, true, flow)) {
-				m_DlssSRMotion.Create(m_pDevice, m_pDeviceContext, inW, inH, CDlssStabilizer::Motion::OpticalFlow,
-					m_pVSimpleInputLayout, m_pVS_Simple, m_pSamplerPoint, m_pSamplerLinear, true, flow);
-			}
-			if (m_DlssSRMotion.IsCreated()) {
-				m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::SRMotion);
-				m_DlssSRMotion.PrepareMotion(m_pDeviceContext, pInput->pShaderResource);
-				m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::SRMotion);
-				pMotion = m_DlssSRMotion.GetMotionVectors();
-				motion = pMotion ? std::wstring(L"OF") : m_DlssSRMotion.GetStatusLine();
-			}
+		const CDlssStabilizer::FlowSettings flow = CDlssStabilizer::ForDlssSR();
+		if (!m_DlssSRMotion.Matches(inW, inH, CDlssStabilizer::Motion::OpticalFlow, true, flow)) {
+			m_DlssSRMotion.Create(m_pDevice, m_pDeviceContext, inW, inH, CDlssStabilizer::Motion::OpticalFlow,
+				m_pVSimpleInputLayout, m_pVS_Simple, m_pSamplerPoint, m_pSamplerLinear, true, flow);
+		}
+		if (m_DlssSRMotion.IsCreated()) {
+			m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::SRMotion);
+			m_DlssSRMotion.PrepareMotion(m_pDeviceContext, pInput->pShaderResource);
+			m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::SRMotion);
+			pMotion = m_DlssSRMotion.GetMotionVectors();
+			motion = pMotion ? std::wstring(L"OF, global motion") : m_DlssSRMotion.GetStatusLine();
 		}
 		if (motion != m_strDlssSRMotion) {
 			m_strDlssSRMotion = motion;
@@ -4351,7 +4496,14 @@ HRESULT CDX11VideoProcessor::Reset(bool bDisplayModeChange)
 {
 	DLog(L"CDX11VideoProcessor::Reset({})", bDisplayModeChange);
 
-	CAutoLock cRendererLock(&m_HDRToggleLock);
+	// The renderer lock first, the toggle lock second, which is the order the other
+	// way in takes them: a setting changed in full playback holds the renderer lock
+	// all the way from SetSettings to HandleHDRToggle. Taken here the other way
+	// round, a display change and a setting change landing together each hold the
+	// lock the other waits for, and the player never comes out of it. The lock is
+	// recursive, so the callers that already hold it lose nothing.
+	CAutoLock cRendererLock(&m_pFilter->m_RendererLock);
+	CAutoLock cHDRToggleLock(&m_HDRToggleLock);
 
 	if (bDisplayModeChange) {
 		if (m_bDisplayModeChangeAfterHDRToggle) {
@@ -4371,7 +4523,6 @@ HRESULT CDX11VideoProcessor::Reset(bool bDisplayModeChange)
 				m_bHDRModeChangeOutside = true;
 
 				if (m_pFilter->m_inputMT.IsValid()) {
-					CAutoLock cRendererLock(&m_pFilter->m_RendererLock);
 					ReleaseSwapChain();
 
 					if (m_iSwapEffect == SWAPEFFECT_Discard && !displayConfig.HDREnabled()) {
@@ -4854,10 +5005,19 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		changeVP = true; // temporary solution
 	}
 
+	if (config.bVPReplaceChroma != m_bVPReplaceChroma) {
+		m_bVPReplaceChroma = config.bVPReplaceChroma;
+		if (!m_bInterlaced && m_srcParams.VP11Format != DXGI_FORMAT_UNKNOWN
+				&& (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422)) {
+			changeVP = true;   // only InitMediaType chooses which processor takes the picture
+		}
+	}
+
 	if (config.iChromaScaling != m_iChromaScaling) {
 		m_iChromaScaling = config.iChromaScaling;
 		m_bMpvChromaFailed = false;
-		changeConvertShader = m_PSConvColorData.bEnable && (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422);
+		changeConvertShader = (m_PSConvColorData.bEnable || m_bChromaReplacedVP)
+			&& (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422);
 	}
 
 	if (config.iHdrOsdBrightness != m_iHdrOsdBrightness) {
@@ -5016,7 +5176,11 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	}
 
 	if (changeConvertShader) {
-		UpdateConvertColorShader();
+		if (m_bChromaReplacedVP) {
+			UpdateConvertTo444Shader();   // the chroma the video processor no longer does
+		} else {
+			UpdateConvertColorShader();
+		}
 	}
 
 	if (changeBitmapShader) {
@@ -5044,7 +5208,7 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	}
 
 	if (changeSuperRes) {
-		auto superRes = (m_bVPScaling && (m_srcParams.CDepth == 8 || !m_bACMEnabled)) ? m_iVPSuperRes : SUPERRES_Disable;
+		auto superRes = (m_bVPScaling && !m_bChromaReplacedVP && (m_srcParams.CDepth == 8 || !m_bACMEnabled)) ? m_iVPSuperRes : SUPERRES_Disable;
 		m_bVPUseSuperRes = (m_D3D11VP.SetSuperRes(superRes) == S_OK);
 	}
 
@@ -5216,6 +5380,18 @@ void CDX11VideoProcessor::UpdateStatsPresent()
 	}
 }
 
+// The chroma upsampling actually in service, whoever converts the picture.
+const wchar_t* CDX11VideoProcessor::ChromaScalingName() const
+{
+	switch (m_iChromaScaling) {
+	case CHROMA_Nearest:    return L"Nearest-neighbor";
+	case CHROMA_Bilinear:   return L"Bilinear";
+	case CHROMA_CatmullRom: return L"Catmull-Rom";
+	case CHROMA_RAVU:       return m_bMpvChromaActive ? L"RAVU-zoom" : L"Catmull-Rom";
+	}
+	return L"?";
+}
+
 void CDX11VideoProcessor::UpdateStatsStatic()
 {
 	if (!m_bShowStats) {
@@ -5233,26 +5409,22 @@ void CDX11VideoProcessor::UpdateStatsStatic()
 			// It converts the picture itself, so the chroma upsampling is its own and
 			// the Chroma upsampling list has nothing to do here.
 			if (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422) {
-				m_strStatsVProc.append(L", converts chroma");
+				if (m_bChromaReplacedVP) {
+					// It reads the picture in 4:4:4 and has no chroma left to rebuild.
+					m_strStatsVProc.append(L", chroma by shaders: ");
+					m_strStatsVProc.append(ChromaScalingName());
+				} else {
+					m_strStatsVProc.append(L", converts chroma");
+					if (m_bVPReplaceChroma) {
+						m_strStatsVProc.append(L" (interlaced)");
+					}
+				}
 			}
 		} else {
 			m_strStatsVProc.append(L"Shaders");
 			if (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422) {
 				m_strStatsVProc.append(L", Chroma scaling: ");
-				switch (m_iChromaScaling) {
-				case CHROMA_Nearest:
-					m_strStatsVProc.append(L"Nearest-neighbor");
-					break;
-				case CHROMA_Bilinear:
-					m_strStatsVProc.append(L"Bilinear");
-					break;
-				case CHROMA_CatmullRom:
-					m_strStatsVProc.append(L"Catmull-Rom");
-					break;
-				case CHROMA_RAVU:
-					m_strStatsVProc.append(m_bMpvChromaActive ? L"RAVU-zoom" : L"Catmull-Rom");
-					break;
-				}
+				m_strStatsVProc.append(ChromaScalingName());
 			}
 		}
 		m_strStatsVProc += std::format(L"\nInternalFormat: {}", DXGIFormatToString(m_InternalTexFmt));
