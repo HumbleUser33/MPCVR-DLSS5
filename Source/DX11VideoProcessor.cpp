@@ -2267,6 +2267,11 @@ void CDX11VideoProcessor::ConvertTo444Pass(ID3D11UnorderedAccessView* pUav)
 		UpdateStatsStatic();
 	}
 
+	// Nothing may still hold one of these planes as a render target: this pass
+	// dispatches, so it sets none of its own, and Direct3D would answer such a read
+	// with zeros -- a green picture, the chroma at the bottom of its range.
+	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+
 	ID3D11ShaderResourceView* srvs[3] = {
 		m_TexSrcVideo.pShaderResource,
 		m_bMpvChromaActive ? MpvChromaPlane(0) : m_TexSrcVideo.pShaderResource2.p,
@@ -3680,6 +3685,7 @@ HRESULT CDX11VideoProcessor::MpvChromaPass()
 			m_TexMpvChromaOut[c].pShaderResource, m_pSamplerPoint, m_pMpvChromaPlaneConstants, m_pVertexBuffer);
 		ID3D11ShaderResourceView* noViews[1] = {};
 		m_pDeviceContext->PSSetShaderResources(1, 1, noViews);
+		m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
 	}
 
 	return FAILED(hr) ? hr : (hr == S_OK ? S_OK : E_FAIL);

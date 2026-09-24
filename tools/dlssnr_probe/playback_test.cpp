@@ -1161,6 +1161,7 @@ int wmain(int argc, wchar_t* argv[])
 		{ "4:2:0, shaders, Jinc (EWA)",        false, false, true, -1, CHROMA_Jinc                     },
 		{ "4:2:0, shaders, FSRCNNX 8 AR",      false, false, true, -1, CHROMA_FSRCNNX8AR               },
 		{ "4:2:0, hardware VP, chroma replaced, Jinc", false, false, true, -1, CHROMA_Jinc, true, false, true },
+		{ "4:2:0, hardware VP, chroma replaced, FSRCNNX 8 AR", false, false, true, -1, CHROMA_FSRCNNX8AR, true, false, true },
 	};
 	const Config* configs = g_bChroma ? chromaConfigs : g_bScalers ? scalerConfigs : dlssConfigs;
 	const int configCount = (int)(g_bChroma ? std::size(chromaConfigs)
