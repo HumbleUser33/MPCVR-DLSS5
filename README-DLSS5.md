@@ -441,7 +441,7 @@ ArtCNN DS and take FSRCNNX or RAVU-zoom.
 
 **Chroma upsampling** has three entries beyond the kernels. **Jinc (EWA)** is the polar kernel
 madVR and mpv call Jinc: jinc(d) windowed by a jinc, cut at 3.2383 — the third zero, mpv's
-`ewa_lanczos`. It is not separable, so it reads a disc of about 33 texels around each point
+`ewa_lanczos`. It is not separable, so it reads a disc of about 32 texels around each point
 rather than a row and a column; chroma sits at a fixed place among the luma pixels, so the
 weights of the four possible positions are worked out when the conversion shader is generated
 and the shader only adds texels up. **RAVU-zoom** and **FSRCNNX 8 AR** instead put Cb and Cr
@@ -454,18 +454,20 @@ sited where video puts it and compared with the same frame in 4:4:4 (`playback_t
 plus the doom9 line-art test. PSNR of Cb and Cr over the picture, then along the luma's edges,
 where bleeding shows and where the eye looks:
 
-| Method | Cb/Cr | at luma edges | whole picture | line art, at edges | time |
+| Method | Cb/Cr | at luma edges | whole picture | line art, at edges | what it costs |
 |---|---|---|---|---|---|
-| **Jinc (EWA)** | **+0.22 dB** | **+0.61 dB** | **+0.20 dB** | +0.25 dB | about 1 ms |
-| **RAVU-zoom** | −0.05 dB | +0.47 dB | −0.08 dB | +1.89 dB | 2.4 ms |
-| Catmull-Rom | 0 | 0 | 0 | 0 | free |
-| **FSRCNNX 8 AR** | −0.32 dB | −0.21 dB | −0.35 dB | **+2.28 dB** | 4.0 ms |
-| Bilinear | −0.29 dB | −0.73 dB | −0.26 dB | −1.55 dB | free |
-| Nearest-neighbor | −1.75 dB | −2.94 dB | −1.68 dB | −3.30 dB | free |
+| **Jinc (EWA)** | **+0.22 dB** | **+0.61 dB** | **+0.20 dB** | +0.25 dB | about 32 texels a pixel, in the conversion shader |
+| **RAVU-zoom** | −0.05 dB | +0.47 dB | −0.08 dB | +1.89 dB | a pass of its own, 2.4 ms at 1080p |
+| Catmull-Rom | 0 | 0 | 0 | 0 | 16 texels a pixel |
+| **FSRCNNX 8 AR** | −0.32 dB | −0.21 dB | −0.35 dB | **+2.28 dB** | a pass of its own, 4.0 ms at 1080p |
+| Bilinear | −0.29 dB | −0.73 dB | −0.26 dB | −1.55 dB | one bilinear fetch |
+| Nearest-neighbor | −1.75 dB | −2.94 dB | −1.68 dB | −3.30 dB | one fetch |
 
 Film and drawn lines want opposite things here, and the list is ordered for film, as asked.
 **Jinc** is the one to take: it is the only method above Catmull-Rom on both the colour itself
-and the colour along edges, it shifts nothing, and it costs about a millisecond. **RAVU-zoom**
+and the colour along edges, it shifts nothing, and it stays inside the conversion shader, which
+reads about thirty-two texels a pixel for it instead of Catmull-Rom's sixteen — it never cost a frame
+in any of the tests here. **RAVU-zoom**
 gains almost as much on edges but half a tenth of a decibel of overall colour, and leaves the
 one-tenth-of-a-level offset every luma-trained network leaves on a chroma plane. **FSRCNNX 8
 AR** is below Catmull-Rom on film — a network trained on luma has no business guessing colour
@@ -658,7 +660,7 @@ above) and each entry keeps its own number, so a setting already saved still mea
 | Setting | Default | What it does |
 |---|---|---|
 | Upscaling | Jinc2m | ArtCNN C4F16 DS, RAVU-zoom and the four FSRCNNX entries enlarge the luma with a network; AR holds what it invented to the range the source covers. Needs Direct3D 11; Catmull-Rom stands in elsewhere and while DLSS SR is enlarging |
-| Chroma upsampling | Catmull-Rom | Jinc (EWA) is the best of them on film and about free; RAVU-zoom and FSRCNNX 8 AR put Cb and Cr through an mpv prescaler, FSRCNNX being the one for drawn lines. All three need Direct3D 11 and 4:2:0 in planes |
+| Chroma upsampling | Catmull-Rom | Jinc (EWA) is the best of them on film and stays inside the conversion shader; RAVU-zoom and FSRCNNX 8 AR put Cb and Cr through an mpv prescaler, FSRCNNX being the one for drawn lines. All three need Direct3D 11 and 4:2:0 in planes |
 
 And under the Chroma upsampling list:
 
