@@ -515,13 +515,16 @@ the luma's edges where bleeding shows, and the constant shift of Cb and Cr in 8-
 | 8-bit (NV12) | the video processor | 52.25 | 48.69 | 0.07 level |
 | | **Catmull-Rom before it** | **52.86** | **49.60** | **0.07 level** |
 | | **RAVU-zoom before it** | **53.30** | **50.18** | **0.10 level** |
+| | **Jinc before it** | **53.66** | **50.72** | **0.07 level** |
 | | Catmull-Rom, shaders alone | 53.38 | 50.05 | 0.02 level |
 | 10-bit (P010) | the video processor | 49.60 | 47.76 | 0.68 level |
 | | **Catmull-Rom before it** | **55.24** | **51.68** | **0.05 level** |
 | | **RAVU-zoom before it** | **55.96** | **52.75** | **0.08 level** |
+| | **Jinc before it** | **56.61** | **53.51** | **0.06 level** |
 | | Catmull-Rom, shaders alone | 55.71 | 51.85 | 0.01 level |
 
-The processor's own chroma comes out between Nearest and Bilinear. On a 10-bit source it also
+The processor's own chroma comes out between Nearest and Bilinear: 5.6 to 7.0 dB under the
+shaders on a 10-bit film, 3.9 to 5.8 dB along its edges. On a 10-bit source it also
 shifts the colour by about seven tenths of a level: its driver reads the studio range as
 16/255 to 235/255 whatever the depth, while a 10-bit signal runs from 64/1023 to 940/1023. The
 shaders read it at its own scale and write the 4:4:4 picture back on the scale the driver
@@ -767,6 +770,7 @@ dlssnr_harness.exe --tupscale     the resize shaders and the mpv prescalers on f
 dlssnr_harness.exe --tupscalecost what EfRLFN costs at film sizes
 dlssnr_harness.exe --tchroma      the chroma upsamplers on 4:2:0 made from film frames
 dlssnr_harness.exe --tmpvport     the filter's prescaler runner against the harness's
+                                  (ArtCNN included: it is the one made of compute passes)
 ```
 
 `--tframes N` sets the frames per run; `--tstrong` uses the strongest network settings;
@@ -820,11 +824,15 @@ statistics drawn over it, as `scalers_<n>_stats.bmp`, which is how the overlay's
 
 `--mainpage` and `--dlsspage` show a property page of the built filter for a few seconds and
 save it as `proppage.bmp`, without a player; `--click <id>` then clicks one control and saves
-the page again as `proppage_clicked.bmp`, which is how the greying is checked. `--chroma`
-plays one picture, a 4K film frame halved, as 4:2:0 and as 4:4:4 at its own size, and
-measures what each chroma upsampler rebuilds against the 4:4:4 one: the hardware video
-processor comes out between Nearest and Bilinear, 1.7 dB under Catmull-Rom along luma
-edges.
+the page again as `proppage_clicked.bmp`, which is how the greying is checked. `--mainpage`
+also prints the *Chroma upsampling* and *Upscaling* lists as the page really built them, each
+entry with the number it carries and which one is selected: a picture says nothing about that,
+and the order of those lists is the point of them. `--chroma` plays one picture, a 4K film
+frame halved, as 4:2:0 and as 4:4:4 at its own size, and measures what each chroma upsampler
+rebuilds against the 4:4:4 one — every method the list offers, and each of them again through
+the video processor with *Replace VP chroma upsampling* on, which is where a chroma pass that
+leaves a render target behind shows up as a colour cast. The hardware processor's own chroma
+comes out between Nearest and Bilinear, 1.7 dB under Catmull-Rom along luma edges.
 
 `--toggle` changes one setting at a time while the film plays, from the thread that owns the
 window as the player does, and checks three things: that the call comes back, that the
