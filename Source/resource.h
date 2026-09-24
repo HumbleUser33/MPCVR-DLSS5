@@ -103,6 +103,8 @@
 #define IDF_PS_11_MPV_LUMA              951
 #define IDF_PS_11_MPV_COMBINE           952
 #define IDF_PS_11_MPV_CHROMA_PLANE      953
+#define IDF_PS_11_MPV_COMBINE_AR        954
+#define IDF_PS_11_MPV_CHROMA_AR         955
 #define IDC_EDIT1                       1001
 #define IDC_EDIT2                       1002
 #define IDC_EDIT_DISPLAYMAX             1003

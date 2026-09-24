@@ -49,6 +49,10 @@ enum :int {
 	CHROMA_Bilinear,
 	CHROMA_CatmullRom,
 	CHROMA_RAVU,       // RAVU-zoom (mpv) on Cb and Cr: Direct3D 11 shaders, 4:2:0; Catmull-Rom elsewhere
+	// Added after RAVU, so the numbers already saved keep their meaning. The order
+	// the property page shows them in is the measured one, not this one.
+	CHROMA_Jinc,       // ewa jinc, radius 3.2383, jinc-windowed: what madVR calls Jinc
+	CHROMA_FSRCNNX8AR, // FSRCNNX 8 on Cb and Cr with anti-ringing; Catmull-Rom elsewhere
 	CHROMA_COUNT
 };
 
@@ -64,6 +68,9 @@ enum :int {
 	UPSCALE_FSRCNNX8,
 	UPSCALE_FSRCNNX16,
 	UPSCALE_RAVUZoom,
+	UPSCALE_FSRCNNX8AR,   // the same networks, held to the range the source covers
+	UPSCALE_FSRCNNX16AR,
+	UPSCALE_ArtCNN,       // ArtCNN C4F16 DS: compute passes, denoises as it enlarges
 	UPSCALE_COUNT
 };
 

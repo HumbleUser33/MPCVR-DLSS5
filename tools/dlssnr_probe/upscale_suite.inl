@@ -23,6 +23,70 @@
 
 namespace temporal {
 
+// A picture moved by part of a pixel, with the kernel the renderer resizes with.
+// A prescaler that writes its result off the grid -- NNEDI3 says so itself -- is
+// put back here; in a player the shift costs nothing, since the picture goes
+// through a resize anyway.
+void ShiftPlane(std::vector<float>& rgba, int W, int H, double dx, double dy)
+{
+	if (dx == 0 && dy == 0) {
+		return;
+	}
+	auto weights = [](double t, double w[4]) {
+		const double t2 = t * t, t3 = t2 * t;
+		w[0] = -0.5 * t3 + t2 - 0.5 * t;
+		w[1] = 1.5 * t3 - 2.5 * t2 + 1.0;
+		w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
+		w[3] = 0.5 * t3 - 0.5 * t2;
+	};
+	const std::vector<float> src(rgba);
+	double wx[4], wy[4];
+	weights(dx - std::floor(dx), wx);
+	weights(dy - std::floor(dy), wy);
+	const int ox = (int)std::floor(dx), oy = (int)std::floor(dy);
+	for (int y = 0; y < H; y++) {
+		for (int x = 0; x < W; x++) {
+			double acc = 0;
+			for (int j = 0; j < 4; j++) {
+				double row = 0;
+				for (int i = 0; i < 4; i++) {
+					const int sx = std::clamp(x + ox - 1 + i, 0, W - 1);
+					const int sy = std::clamp(y + oy - 1 + j, 0, H - 1);
+					row += wx[i] * src[4 * ((size_t)sy * W + sx)];
+				}
+				acc += wy[j] * row;
+			}
+			rgba[4 * ((size_t)y * W + x)] = (float)acc;
+		}
+	}
+}
+
+// A picture pulled back towards the range the source really covers around each
+// pixel, by `strength` of the way -- libplacebo's anti-ringing, applied after a
+// doubler instead of inside a kernel. The source is the reduced picture the
+// method was given; `factor` is how much bigger the output is.
+void AntiRingPlane(std::vector<float>& rgba, int W, int H,
+                   const std::vector<float>& lowres, int lw, int lh, int factor, float strength)
+{
+	for (int y = 0; y < H; y++) {
+		for (int x = 0; x < W; x++) {
+			const double u = (x + 0.5) / factor - 0.5, v = (y + 0.5) / factor - 0.5;
+			const int ix = (int)std::floor(u), iy = (int)std::floor(v);
+			float lo = 1e9f, hi = -1e9f;
+			for (int j = 0; j <= 1; j++) {
+				for (int i = 0; i <= 1; i++) {
+					const size_t k = (size_t)std::clamp(iy + j, 0, lh - 1) * lw + std::clamp(ix + i, 0, lw - 1);
+					const float sample = Luma(&lowres[4 * k]);
+					lo = std::min(lo, sample);
+					hi = std::max(hi, sample);
+				}
+			}
+			float& value = rgba[4 * ((size_t)y * W + x)];
+			value += strength * (std::clamp(value, lo, hi) - value);
+		}
+	}
+}
+
 // A reference picture, and the largest size it can honestly stand for.
 struct UpscaleRef {
 	std::wstring name;
@@ -974,7 +1038,10 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx, int maxRefs =
 					continue;   // chroma shaders are --tchroma's
 				}
 				if (shader->HasPixelOffset()) {
-					printf("  %S: shifts its output by part of a pixel, which mpv's main scaler corrects; left out\n", d.c_str());
+					printf("  mpv shader %s, %d passes, output shifted by %.2f, %.2f pixels (taken back with Catmull-Rom,\n"
+						"    as the player's own resize would)\n", shader->Name().c_str(), shader->PassCount(),
+						shader->PixelOffsetX(), shader->PixelOffsetY());
+					lumaShaders.push_back(std::move(shader));
 					continue;
 				}
 				printf("  mpv shader %s, %d passes\n", shader->Name().c_str(), shader->PassCount());
@@ -1269,6 +1336,11 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx, int maxRefs =
 									g_failures++;
 									continue;
 								}
+								if (shader->HasPixelOffset()) {
+									// Where the shader says it left its result, put back. The sign is
+									// the one measured: a sweep of shifts peaks at the declared offset.
+									ShiftPlane(upscaled, ref.W, ref.H, shader->PixelOffsetX(), shader->PixelOffsetY());
+								}
 								for (size_t p = 0; p + 3 < upscaled.size(); p += 4) {
 									upscaled[p + 1] = upscaled[p + 2] = upscaled[p];
 									upscaled[p + 3] = 1.0f;
@@ -1276,6 +1348,20 @@ static int RunUpscale(ID3D11Device* dev, ID3D11DeviceContext* ctx, int maxRefs =
 								const UpscaleMetrics m = Measure(upscaled, ref.rgba, ref.W, ref.H, deg.jpeg > 0 ? 8 * factor : 0);
 								Out("  %-24s %8.3f %8.3f %7.4f %7.3f %8.5f %7.3f %7.3f %6.2f ms",
 								    shader->Name().c_str(), m.psnr, m.psnrDetail, m.ssim, m.sharp, m.halo, m.grain, m.block, ms);
+								{
+									// The same output, held to the values the source really
+									// carries around each pixel: the ringing a doubler adds
+									// against the detail that costs.
+									std::vector<float> ringed(upscaled);
+									AntiRingPlane(ringed, ref.W, ref.H, lowres, lw, lh, factor, 0.8f);
+									for (size_t q = 0; q + 3 < ringed.size(); q += 4) {
+										ringed[q + 1] = ringed[q + 2] = ringed[q];
+									}
+									const UpscaleMetrics mar = Measure(ringed, ref.rgba, ref.W, ref.H, deg.jpeg > 0 ? 8 * factor : 0);
+									Out("\n  %-24s %8.3f %8.3f %7.4f %7.3f %8.5f %7.3f %7.3f %6.2f ms",
+									    (shader->Name() + " AR").c_str(), mar.psnr, mar.psnrDetail, mar.ssim,
+									    mar.sharp, mar.halo, mar.grain, mar.block, ms);
+								}
 								if (m.notFinite) {
 									Out("   (%lld not a number)", m.notFinite);
 									g_failures++;

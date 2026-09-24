@@ -885,6 +885,28 @@ static int ShowPropertyPage(HMODULE hFilter, HWND hwnd, int seconds, REFCLSID cl
 	};
 	Shoot(L"proppage.bmp");
 
+	// The two scaling lists as the page really built them: what each entry is called,
+	// the number it carries (what gets saved) and which one is selected. A picture of
+	// the page says nothing about that, and the order is the point of them.
+	if (const HWND hDlg = GetWindow(hwnd, GW_CHILD)) {
+		for (const auto& list : { std::pair{ 1045, "Chroma upsampling" }, std::pair{ 1042, "Upscaling" } }) {
+			const HWND hCombo = GetDlgItem(hDlg, list.first);
+			if (!hCombo) {
+				continue;
+			}
+			const LRESULT count = SendMessageW(hCombo, CB_GETCOUNT, 0, 0);
+			const LRESULT current = SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
+			printf("%s, best first:\n", list.second);
+			for (LRESULT i = 0; i < count; i++) {
+				wchar_t text[64] = {};
+				SendMessageW(hCombo, CB_GETLBTEXT, i, (LPARAM)text);
+				wprintf(L"  %2d  %-20s value %2d%s\n", (int)i, text,
+					(int)SendMessageW(hCombo, CB_GETITEMDATA, i, 0), i == current ? L"   <- selected" : L"");
+			}
+		}
+		fflush(stdout);
+	}
+
 	// Tick a box and take the page again: how the greying answers, without a player.
 	if (clickId) {
 		const HWND hDlg = GetWindow(hwnd, GW_CHILD);
@@ -1118,8 +1140,12 @@ int wmain(int argc, wchar_t* argv[])
 		{ "FSRCNNX 8, chroma Catmull-Rom",   false, false, true, UPSCALE_FSRCNNX8,   CHROMA_CatmullRom },
 		{ "FSRCNNX 16, chroma Catmull-Rom",  false, false, true, UPSCALE_FSRCNNX16,  CHROMA_CatmullRom },
 		{ "RAVU-zoom, chroma Catmull-Rom",   false, false, true, UPSCALE_RAVUZoom,   CHROMA_CatmullRom },
+		{ "FSRCNNX 8 AR, chroma Catmull-Rom", false, false, true, UPSCALE_FSRCNNX8AR, CHROMA_CatmullRom },
+		{ "FSRCNNX 16 AR, chroma Catmull-Rom", false, false, true, UPSCALE_FSRCNNX16AR, CHROMA_CatmullRom },
+		{ "ArtCNN C4F16 DS, chroma Catmull-Rom", false, false, true, UPSCALE_ArtCNN, CHROMA_CatmullRom },
 		{ "Catmull-Rom, chroma RAVU-zoom",   false, false, true, UPSCALE_CatmullRom, CHROMA_RAVU       },
 		{ "RAVU-zoom, chroma RAVU-zoom",     false, false, true, UPSCALE_RAVUZoom,   CHROMA_RAVU       },
+		{ "ArtCNN C4F16 DS, chroma Jinc",    false, false, true, UPSCALE_ArtCNN,     CHROMA_Jinc       },
 	};
 	// The reference comes first: the same picture in 4:4:4, which needs no chroma
 	// upsampling at all, through the same conversion to RGB.
@@ -1132,6 +1158,9 @@ int wmain(int argc, wchar_t* argv[])
 		{ "4:2:0, shaders, Bilinear",          false, false, true, -1, CHROMA_Bilinear                 },
 		{ "4:2:0, shaders, Catmull-Rom",       false, false, true, -1, CHROMA_CatmullRom               },
 		{ "4:2:0, shaders, RAVU-zoom",         false, false, true, -1, CHROMA_RAVU                     },
+		{ "4:2:0, shaders, Jinc (EWA)",        false, false, true, -1, CHROMA_Jinc                     },
+		{ "4:2:0, shaders, FSRCNNX 8 AR",      false, false, true, -1, CHROMA_FSRCNNX8AR               },
+		{ "4:2:0, hardware VP, chroma replaced, Jinc", false, false, true, -1, CHROMA_Jinc, true, false, true },
 	};
 	const Config* configs = g_bChroma ? chromaConfigs : g_bScalers ? scalerConfigs : dlssConfigs;
 	const int configCount = (int)(g_bChroma ? std::size(chromaConfigs)

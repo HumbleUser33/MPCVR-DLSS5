@@ -111,16 +111,27 @@ public:
 	const std::string& Name() const { return m_name; }
 	bool Hooks(const char* plane) const;
 	int PassCount() const { return (int)m_passes.size(); }
-	// A pass shifts its output by part of a pixel, which mpv corrects in its main
-	// scaler: not reproduced here, so such a shader is left out rather than misjudged.
-	bool HasPixelOffset() const
+	// A pass may write its result part of a pixel off -- NNEDI3 does, half a pixel
+	// on each axis -- which mpv's main scaler takes back when it samples the result.
+	// Here the shifts are added up, in output pixels, for the caller to undo.
+	bool HasPixelOffset() const { return PixelOffsetX() != 0 || PixelOffsetY() != 0; }
+
+	double PixelOffsetX() const { return PixelOffset(0); }
+	double PixelOffsetY() const { return PixelOffset(1); }
+
+	double PixelOffset(int axis) const
 	{
+		double total = 0;
 		for (const Pass& p : m_passes) {
-			if (p.offset != "-" && p.offset != "ALIGN") {
-				return true;
+			if (p.offset == "-" || p.offset == "ALIGN") {
+				continue;
+			}
+			double x = 0, y = 0;
+			if (sscanf_s(p.offset.c_str(), "%lf %lf", &x, &y) == 2) {
+				total += axis ? y : x;
 			}
 		}
-		return false;
+		return total;
 	}
 
 	// Runs every pass that hooks `plane`. planes holds LUMA and, for a chroma shader,
@@ -403,10 +414,8 @@ int CMpvShader::Run(ID3D11Device* dev, ID3D11DeviceContext* ctx, const char* pla
 		if (when == 0.0) {
 			continue;
 		}
-		if (p.offset != "-" && p.offset != "ALIGN") {
-			error = p.desc + ": OFFSET " + p.offset + " is not compensated";
-			return -1;
-		}
+		// OFFSET is the pass saying where its result lands; the caller undoes it.
+
 		double dw = hooked.w, dh = hooked.h;
 		if ((p.width != "-" && !EvalRpn(p.width, lookup, dw)) || (p.height != "-" && !EvalRpn(p.height, lookup, dh))) {
 			error = p.desc + ": size";

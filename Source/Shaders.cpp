@@ -20,6 +20,8 @@
 
 #include "stdafx.h"
 #include <D3Dcompiler.h>
+#include <cmath>
+#include <numbers>
 #include "Helper.h"
 #include "resource.h"
 #include "IVideoRenderer.h"
@@ -110,11 +112,78 @@ static void SampleAtTopLevel(std::string& code)
 	}
 }
 
+// The polar kernel madVR and mpv call Jinc: jinc(d), windowed by a jinc stretched
+// to the radius, cut at 3.2383 -- the third zero of jinc, mpv's ewa_lanczos. It is
+// not separable, so the weights are a disc around each point, not a row and a column.
+static double JincWindowed(const double d)
+{
+	constexpr double kRadius = 3.2383;      // the third zero of jinc
+	constexpr double kFirstZero = 1.2196699;
+	if (d >= kRadius) {
+		return 0.0;
+	}
+	const auto jinc = [](const double x) {
+		if (x < 1e-8) {
+			return 1.0;
+		}
+		const double t = std::numbers::pi * x;
+		return 2.0 * std::cyl_bessel_j(1.0, t) / t;
+	};
+	return jinc(d) * jinc(d * kFirstZero / kRadius);
+}
+
+// The same kernel on 4:2:0 chroma, written out. Chroma sits at a fixed place among
+// the luma pixels, so a pixel's position inside its chroma texel depends only on the
+// parity of its coordinates: four sets of weights, known here once and for all, and
+// the shader then only adds texels up. `sample` is the texel at an offset, `{}` twice
+// for the offset; `target` is what the sum goes into.
+static void AppendJincChroma420(const UINT chromaSubsampling, const char* sample, const char* target,
+	std::string& code)
+{
+	// Where the chroma sample sits, in chroma texels, from the centred position.
+	const double sx = (chromaSubsampling == DXVA2_VideoChromaSubsampling_MPEG1) ? 0.0 : 0.25;
+	const double sy = (chromaSubsampling == DXVA2_VideoChromaSubsampling_Cosited) ? 0.25 : 0.0;
+	constexpr int kReach = 4;
+
+	code.append("uint2 jinc_parity = uint2(input.Tex * wh) & 1u;\n");
+	for (int py = 0; py < 2; py++) {
+		code += std::format("{}(jinc_parity.y == {}) {{\n", py ? "} else if " : "if ", py);
+		for (int px = 0; px < 2; px++) {
+			code += std::format("{}(jinc_parity.x == {}) {{\n", px ? "} else if " : "if ", px);
+			double weights[2 * kReach + 1][2 * kReach + 1] = {};
+			double total = 0;
+			for (int j = -kReach; j <= kReach; j++) {
+				for (int i = -kReach; i <= kReach; i++) {
+					const double dx = i + 0.5 - (px + 0.5) / 2 - sx;
+					const double dy = j + 0.5 - (py + 0.5) / 2 - sy;
+					const double weight = JincWindowed(std::sqrt(dx * dx + dy * dy));
+					weights[j + kReach][i + kReach] = weight;
+					total += weight;
+				}
+			}
+			code += std::format("{} = 0;\n", target);
+			for (int j = -kReach; j <= kReach; j++) {
+				for (int i = -kReach; i <= kReach; i++) {
+					const double weight = weights[j + kReach][i + kReach] / total;
+					if (weight == 0.0) {
+						continue;
+					}
+					code += std::format("{} += {:.8f} * ", target, weight);
+					code += std::vformat(sample, std::make_format_args(i, j));
+					code.append(";\n");
+				}
+			}
+		}
+		code.append("}\n");
+	}
+	code.append("}\n");
+}
+
 void ShaderGetPixels(
 	const bool bDX11,
 	const FmtConvParams_t& fmtParams,
 	const UINT chromaSubsampling,
-	const int chromaScaling,
+	int chromaScaling,
 	const bool blendDeinterlace,
 	const DXGI_FORMAT packedFormat,   // DXGI_FORMAT_UNKNOWN: a pixel shader, as usual
 	std::string& code)
@@ -144,6 +213,14 @@ void ShaderGetPixels(
 	// RAVU-zoom: the renderer has already brought Cb and Cr to the luma size, into
 	// t1 and t2, sited on the luma pixels. The pixel shader then only reads them.
 	const bool chromaPrescaled = bDX11 && chromaScaling == CHROMA_RAVU && fmtParams.Subsampling == 420 && planes >= 2;
+
+	// Jinc is written for 4:2:0 in planes, under Direct3D 11. Catmull-Rom stands in
+	// for it anywhere else, and for a prescaler the renderer could not start.
+	const bool bJinc = bDX11 && chromaScaling == CHROMA_Jinc && fmtParams.Subsampling == 420 && planes >= 2;
+	if (!bJinc && (chromaScaling == CHROMA_Jinc || chromaScaling == CHROMA_FSRCNNX8AR)) {
+		chromaScaling = CHROMA_CatmullRom;
+	}
+
 	if (chromaPrescaled) {
 		planes = 3;
 	}
@@ -304,6 +381,9 @@ void ShaderGetPixels(
 				}
 				code.append(code_Bicubic_UV);
 			}
+			else if (bJinc) {
+				AppendJincChroma420(chromaSubsampling, "texUV.Sample(samp, input.Tex, int2({}, {})).rg", "colorUV", code);
+			}
 			else if (chromaScaling == CHROMA_CatmullRom && fmtParams.Subsampling == 422) {
 				code.append(
 					"if (fmod(input.Tex.x*w, 2) < 1.0) {\n"
@@ -351,6 +431,11 @@ void ShaderGetPixels(
 					}
 				}
 				code.append(code_Bicubic_UV);
+			}
+			else if (bJinc) {
+				AppendJincChroma420(chromaSubsampling,
+					"float2(texU.Sample(samp, input.Tex, int2({0}, {1})).r, texV.Sample(samp, input.Tex, int2({0}, {1})).r)",
+					"colorUV", code);
 			}
 			else if (chromaScaling == CHROMA_CatmullRom && fmtParams.Subsampling == 422) {
 				code.append(

@@ -16,6 +16,61 @@ namespace {
 
 constexpr float kCb = 1.8556f, kCr = 1.5748f;   // BT.709: B - Y and R - Y over these
 
+// jinc(x) = 2 J1(pi x) / (pi x): the polar kernel "Jinc" means in madVR and in
+// mpv's ewa_lanczos, windowed by itself at the radius, as libplacebo does it.
+double Jinc(double x)
+{
+	if (x < 1e-8) {
+		return 1.0;
+	}
+	const double t = 3.14159265358979323846 * x;
+	return 2.0 * std::cyl_bessel_j(1.0, t) / t;
+}
+
+// Chroma at (x, y) of the full-size picture, read from the half-size plane at
+// its centred position with a polar kernel of radius 3.2383 -- the third zero of
+// jinc, mpv's default for ewa_lanczos.
+float SampleChromaJinc(const std::vector<float>& plane, int cw, int ch, int x, int y)
+{
+	constexpr double kRadius = 3.2383;      // third zero of jinc, mpv's ewa_lanczos
+	constexpr double kFirstZero = 1.2196699;
+	const double u = (x + 0.5) / 2 - 0.5, v = (y + 0.5) / 2 - 0.5;
+	const int ix = (int)std::floor(u), iy = (int)std::floor(v);
+	double acc = 0, weight = 0;
+	const int reach = (int)std::ceil(kRadius);
+	for (int j = -reach; j <= reach + 1; j++) {
+		for (int i = -reach; i <= reach + 1; i++) {
+			const double dx = ix + i - u, dy = iy + j - v;
+			const double d = std::sqrt(dx * dx + dy * dy);
+			if (d >= kRadius) {
+				continue;
+			}
+			const double w = Jinc(d) * Jinc(d * kFirstZero / kRadius);
+			acc += w * plane[(size_t)std::clamp(iy + j, 0, ch - 1) * cw + std::clamp(ix + i, 0, cw - 1)];
+			weight += w;
+		}
+	}
+	return weight != 0 ? (float)(acc / weight) : 0.0f;
+}
+
+// Anti-ringing, the way libplacebo does it: a pixel is pulled back towards the
+// range the samples around it really cover, by `strength` of the way. 0.8 is
+// where libplacebo settles, and the doom9 test shows what it buys.
+float AntiRing(float value, const std::vector<float>& plane, int cw, int ch, int x, int y, float strength)
+{
+	const double u = (x + 0.5) / 2 - 0.5, v = (y + 0.5) / 2 - 0.5;
+	const int ix = (int)std::floor(u), iy = (int)std::floor(v);
+	float lo = 1e9f, hi = -1e9f;
+	for (int j = 0; j <= 1; j++) {
+		for (int i = 0; i <= 1; i++) {
+			const float sample = plane[(size_t)std::clamp(iy + j, 0, ch - 1) * cw + std::clamp(ix + i, 0, cw - 1)];
+			lo = std::min(lo, sample);
+			hi = std::max(hi, sample);
+		}
+	}
+	return value + strength * (std::clamp(value, lo, hi) - value);
+}
+
 // Chroma at (x, y) of the full-size picture, read from the half-size plane at
 // its centred position with a separable kernel of 2 (bilinear) or 4 taps.
 float SampleChroma(const std::vector<float>& plane, int cw, int ch, int x, int y, bool cubic)
@@ -50,6 +105,40 @@ float SampleChroma(const std::vector<float>& plane, int cw, int ch, int x, int y
 		acc += wy[j] * row;
 	}
 	return acc;
+}
+
+// A plane moved by part of a pixel with Catmull-Rom, for a prescaler that says it
+// writes its result off the grid (NNEDI3).
+void ShiftChroma(std::vector<float>& plane, int W, int H, double dx, double dy)
+{
+	if (dx == 0 && dy == 0) {
+		return;
+	}
+	auto weights = [](double t, double w[4]) {
+		const double t2 = t * t, t3 = t2 * t;
+		w[0] = -0.5 * t3 + t2 - 0.5 * t;
+		w[1] = 1.5 * t3 - 2.5 * t2 + 1.0;
+		w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
+		w[3] = 0.5 * t3 - 0.5 * t2;
+	};
+	const std::vector<float> src(plane);
+	double wx[4], wy[4];
+	weights(dx - std::floor(dx), wx);
+	weights(dy - std::floor(dy), wy);
+	const int ox = (int)std::floor(dx), oy = (int)std::floor(dy);
+	for (int y = 0; y < H; y++) {
+		for (int x = 0; x < W; x++) {
+			double acc = 0;
+			for (int j = 0; j < 4; j++) {
+				double row = 0;
+				for (int i = 0; i < 4; i++) {
+					row += wx[i] * src[(size_t)std::clamp(y + oy - 1 + j, 0, H - 1) * W + std::clamp(x + ox - 1 + i, 0, W - 1)];
+				}
+				acc += wy[j] * row;
+			}
+			plane[(size_t)y * W + x] = (float)acc;
+		}
+	}
 }
 
 struct ChromaMetrics {
@@ -183,7 +272,8 @@ static int RunChroma(ID3D11Device* dev, ID3D11DeviceContext* ctx, int maxRefs)
 		}
 		std::vector<std::unique_ptr<CMpvShader>> doublers;
 		if (!rc) {
-			for (const wchar_t* name : { L"FSRCNNX_x2_8-0-4-1", L"FSRCNNX_x2_16-0-4-1", L"ravu-zoom-ar-r3", L"ravu-lite-ar-r4" }) {
+			for (const wchar_t* name : { L"FSRCNNX_x2_8-0-4-1", L"FSRCNNX_x2_16-0-4-1", L"ravu-zoom-ar-r3",
+					L"ravu-lite-ar-r4", L"ArtCNN_C4F16", L"ArtCNN_C4F16_DS", L"nnedi3-nns32-win8x4" }) {
 				auto shader = std::make_unique<CMpvShader>();
 				std::string error;
 				if (!shader->Load(dev, std::wstring(L"upscalers\\hlsl\\") + name, error)) {
@@ -299,15 +389,37 @@ static int RunChroma(ID3D11Device* dev, ID3D11DeviceContext* ctx, int maxRefs)
 					std::vector<float> subCbHalf(subCb.size()), subCrHalf(subCr.size());
 					std::transform(subCb.begin(), subCb.end(), subCbHalf.begin(), half);
 					std::transform(subCr.begin(), subCr.end(), subCrHalf.begin(), half);
-					for (const bool cubic : { false, true }) {
+					// The kernels, each also with anti-ringing where it can overshoot:
+					// bilinear cannot, so it is left alone.
+					struct Kernel {
+						const char* name;
+						int kind;          // 0 bilinear, 1 Catmull-Rom, 2 Jinc
+						float antiring;    // 0: none
+					};
+					static const Kernel kKernels[] = {
+						{ "Bilinear",       0, 0.0f },
+						{ "Catmull-Rom",    1, 0.0f },
+						{ "Catmull-Rom AR", 1, 0.8f },
+						{ "Jinc (ewa r3)",  2, 0.0f },
+						{ "Jinc AR",        2, 0.8f },
+					};
+					for (const Kernel& kernel : kKernels) {
 						std::vector<float> cb((size_t)W * H), cr((size_t)W * H);
 						for (int j = 0; j < H; j++) {
 							for (int i = 0; i < W; i++) {
-								cb[(size_t)j * W + i] = half(SampleChroma(subCbHalf, cw, chh, i, j, cubic));
-								cr[(size_t)j * W + i] = half(SampleChroma(subCrHalf, cw, chh, i, j, cubic));
+								float vb = kernel.kind == 2 ? SampleChromaJinc(subCbHalf, cw, chh, i, j)
+									: SampleChroma(subCbHalf, cw, chh, i, j, kernel.kind == 1);
+								float vr = kernel.kind == 2 ? SampleChromaJinc(subCrHalf, cw, chh, i, j)
+									: SampleChroma(subCrHalf, cw, chh, i, j, kernel.kind == 1);
+								if (kernel.antiring > 0) {
+									vb = AntiRing(vb, subCbHalf, cw, chh, i, j, kernel.antiring);
+									vr = AntiRing(vr, subCrHalf, cw, chh, i, j, kernel.antiring);
+								}
+								cb[(size_t)j * W + i] = half(vb);
+								cr[(size_t)j * W + i] = half(vr);
 							}
 						}
-						row(cubic ? "Catmull-Rom" : "Bilinear", cb, cr, 0, false);
+						row(kernel.name, cb, cr, 0, false);
 					}
 
 					// The planes for the shaders: luma alone, and Cb, Cr in red and green.
@@ -465,7 +577,25 @@ static int RunChroma(ID3D11Device* dev, ID3D11DeviceContext* ctx, int maxRefs)
 									g_failures++;
 									continue;
 								}
+								if (shader->HasPixelOffset()) {
+									// Where the shader says it left its result, put back.
+									ShiftChroma(cb, W, H, shader->PixelOffsetX(), shader->PixelOffsetY());
+									ShiftChroma(cr, W, H, shader->PixelOffsetX(), shader->PixelOffsetY());
+								}
 								row(shader->Name().c_str(), cb, cr, ms, true);
+
+								// The same, pulled back towards the colours the source really
+								// carries around each pixel: what a doubler overshoots is
+								// ringing, and this is what an AR variant of it would cost.
+								std::vector<float> cbAr(cb), crAr(cr);
+								for (int j = 0; j < H; j++) {
+									for (int i = 0; i < W; i++) {
+										const size_t k = (size_t)j * W + i;
+										cbAr[k] = AntiRing(cb[k], subCbHalf, cw, chh, i, j, 0.8f);
+										crAr[k] = AntiRing(cr[k], subCrHalf, cw, chh, i, j, 0.8f);
+									}
+								}
+								row((shader->Name() + " AR").c_str(), cbAr, crAr, ms, true);
 							}
 						}
 					}

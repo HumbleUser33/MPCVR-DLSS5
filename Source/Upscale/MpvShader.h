@@ -36,7 +36,9 @@ struct MpvPassInfo {
 	const char* width;  // output size in reverse polish; nullptr: the plane's
 	const char* height;
 	const char* when;   // condition in reverse polish; nullptr: always
-	UINT resid;         // compiled pixel shader
+	UINT resid;         // the compiled pass
+	UINT blockW;        // a compute pass: the output block one workgroup covers,
+	UINT blockH;        // and 0 for a pixel pass, which draws a triangle instead
 };
 
 // A lookup table of a user shader (//!TEXTURE), in RGBA16F texels.
@@ -56,11 +58,13 @@ struct MpvShaderInfo {
 	UINT textureCount;
 };
 
-// Runs a prescaler translated from an mpv user shader (FSRCNNX, RAVU) on one plane,
-// the way libplacebo does: each pass renders into an RGBA16F texture of the size its
-// WIDTH and HEIGHT give, reading the plane, what earlier passes saved and the
-// shader's lookup tables. What the last pass that replaces the plane writes is the
-// enlarged plane. Needs feature level 11.0: the passes are shader model 5.
+// Runs a prescaler translated from an mpv user shader (FSRCNNX, RAVU, ArtCNN) on one
+// plane, the way libplacebo does: each pass renders -- or, for ArtCNN, dispatches --
+// into an RGBA16F texture of the size its WIDTH and HEIGHT give, reading the plane,
+// what earlier passes saved and the shader's lookup tables. What the last pass that
+// replaces the plane writes is the enlarged plane. Needs feature level 11.0: the
+// passes are shader model 5, and a compute pass writes through slot 0, the one
+// unordered access slot that level always gives.
 class CMpvShader
 {
 public:
@@ -68,6 +72,7 @@ public:
 		CComPtr<ID3D11Texture2D> pTexture;
 		CComPtr<ID3D11ShaderResourceView> pShaderResource;
 		CComPtr<ID3D11RenderTargetView> pRenderTarget;
+		CComPtr<ID3D11UnorderedAccessView> pUnorderedAccess; // what a compute pass writes through
 		UINT width = 0;
 		UINT height = 0;
 
@@ -111,6 +116,7 @@ private:
 		int saveSlot = -1; // -1: replaces the plane
 		std::vector<std::string> when, width, height;
 		CComPtr<ID3D11PixelShader> pShader;
+		CComPtr<ID3D11ComputeShader> pCompute; // instead of pShader, for a compute pass
 	};
 	struct Table {
 		Texture texture;

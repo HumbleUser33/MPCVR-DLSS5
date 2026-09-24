@@ -366,49 +366,120 @@ decide whether its cleaner look is worth it on your films.
 
 ---
 
-## Upscaling: FSRCNNX and RAVU-zoom
+## Upscaling: FSRCNNX, RAVU-zoom and ArtCNN
 
-Three entries at the end of the main page's **Upscaling** list enlarge the luma with a small
+The main page's **Upscaling** and **Chroma upsampling** lists are ordered by what they measured,
+best first, on 1080p film brought to 4K. Six of the entries enlarge one plane with a small
 network instead of a filter kernel, the way mpv's prescalers do:
 
-| Entry | What it is | Luma time, 1080p→4K, RTX 3050 |
+| Entry | What it is | 1080p→4K luma, RTX 3050 |
 |---|---|---|
-| **FSRCNNX 8** | FSRCNNX_x2_8-0-4-1, a 4-layer convolutional network, doubles | 4.6 ms |
-| **FSRCNNX 16** | FSRCNNX_x2_16-0-4-1, the same with 16 feature maps, doubles | 16.6 ms |
-| **RAVU-zoom** | RAVU-Zoom-AR r3, trained edge-directed weights, to any size at once | 2.8 ms |
+| **ArtCNN C4F16 DS** | ArtCNN C4F16 DS: four convolution layers in compute passes, doubles. Cleans grain and compression as it enlarges | 14.5 ms, 63 MB |
+| **RAVU-zoom** | RAVU-Zoom-AR r3: trained edge-directed weights, to any size at once, anti-ringing inside the kernel | 3.9 ms, no extra texture |
+| **FSRCNNX 16 AR** | FSRCNNX_x2_16-0-4-1, 16 feature maps, doubles, with anti-ringing | 18.0 ms, 190 MB |
+| **FSRCNNX 8 AR** | FSRCNNX_x2_8-0-4-1, the same with 8, with anti-ringing | 5.9 ms, 95 MB |
+| **FSRCNNX 16**, **FSRCNNX 8** | the same two without anti-ringing | the same |
 
 The colour comes from Catmull-Rom, which enlarges the picture as usual; the network's luma
 then replaces its own, by adding the difference to R, G and B alike, so chroma is untouched.
 Where the picture grows by more than the doubling (720p on a 4K screen) the resize shaders
 finish the job, and where it grows by less they reduce what the network doubled, as mpv does.
-Below 1.3× FSRCNNX does not run at all, and RAVU-zoom needs the picture to grow on both axes;
-the statistics then name Catmull-Rom, which is what runs. They need Direct3D 11 at feature
-level 11.0 (the passes are shader model 5); on Direct3D 9, on older hardware, and while DLSS
-Super Resolution is enlarging the picture, Catmull-Rom stands in.
+Below 1.3× FSRCNNX and ArtCNN do not run at all, and RAVU-zoom needs the picture to grow on
+both axes; the statistics then name Catmull-Rom, which is what runs. They need Direct3D 11 at
+feature level 11.0 (the passes are shader model 5, ArtCNN's in compute); on Direct3D 9, on
+older hardware, and while DLSS Super Resolution is enlarging the picture, Catmull-Rom stands
+in.
 
-**Chroma upsampling** has a fourth entry, **RAVU-zoom**, which brings Cb and Cr to the luma
-size with the same shader, each plane on its own and placed where the video's chroma siting
-puts it (MPEG-2, co-sited or centred). It runs on 4:2:0 through the shader video processor;
-elsewhere — 4:2:2, the hardware video processor, Direct3D 9 — Catmull-Rom does it.
+### Anti-ringing
 
-What they are worth, on seven 4K film frames reduced and enlarged again (`--tupscale`,
-`--tchroma`), as PSNR on the most detailed quarter of the picture, against Catmull-Rom:
+A network asked to double a picture invents an edge steeper than the one it was given, and
+overshoots past it — the bright fringe along a dark line. **AR** takes that back the way
+libplacebo does inside its own kernels: the value is pulled towards the range the four source
+samples around that point really cover, four fifths of the way. RAVU-zoom carries this in its
+own kernel already, which is what the AR of its upstream name means; FSRCNNX and ArtCNN do not,
+so the list offers the two FSRCNNX entries both ways and you can hear the difference in the
+`halo` column below. It costs nothing measurable in time, about a seventh of a decibel of
+detail on clean film, and two hundredths of the sharpness.
 
-| Method | 1080p→4K | 720p→4K | 1080p→4K, compressed |
-|---|---|---|---|
-| FSRCNNX 16 | **+1.80 dB** | **+2.65 dB** | −0.33 dB |
-| FSRCNNX 8 | +1.33 dB | +2.36 dB | −0.42 dB |
-| RAVU-zoom | +1.26 dB | +1.68 dB | −0.02 dB |
-| Jinc2m | −4.87 dB | −1.65 dB | −2.21 dB |
+### What each one is worth: luma
 
-They restore edges close to the original's sharpness (0.96 to 0.97 where the original is 1.00
-and Catmull-Rom 0.90) without the halos and the aliasing Jinc2m adds at 1.13. On compressed
-sources every method lands within half a decibel of Catmull-Rom, and on grain RAVU-zoom
-matches it while FSRCNNX keeps a little more of it. For chroma none of them beats Catmull-Rom
-on film: RAVU-zoom is about a decibel under it overall and a little better only on colour
-edges, which is why Catmull-Rom is what the filter defaults to. The **defaults changed**:
-Upscaling is Jinc2m and Chroma upsampling Catmull-Rom for a fresh installation; settings
-already saved in the registry are left alone.
+Ten 4K film frames reduced by 2 or by 3, degraded the way a source is, then enlarged again
+(`dlssnr_harness --tupscale`), plus the doom9 line-art test. PSNR on the most detailed quarter
+of the picture, against Catmull-Rom; `halo` is how far the output overshoots the range the
+reference really covers along its edges, so lower is better and 0 is a kernel that cannot ring.
+
+| Method | 1080p→4K | grain | compressed | 720p→4K | line art | halo | time |
+|---|---|---|---|---|---|---|---|
+| **ArtCNN C4F16 DS** | −1.36 dB | **+1.37 dB** | **+0.38 dB** | +0.20 dB | **+2.92 dB** | 0.00028 | 14.5 ms |
+| **RAVU-zoom** | +1.56 dB | +0.58 dB | +0.20 dB | +1.58 dB | +0.65 dB | **0.00002** | 3.9 ms |
+| **FSRCNNX 16 AR** | +2.02 dB | +0.31 dB | −0.02 dB | +2.27 dB | +2.43 dB | 0.00005 | 18.0 ms |
+| **FSRCNNX 8 AR** | +1.58 dB | +0.15 dB | −0.11 dB | +1.96 dB | +1.98 dB | 0.00005 | 5.9 ms |
+| **FSRCNNX 16** | **+2.18 dB** | +0.23 dB | −0.12 dB | **+2.65 dB** | +1.76 dB | 0.00023 | 18.0 ms |
+| **FSRCNNX 8** | +1.72 dB | +0.03 dB | −0.22 dB | +2.28 dB | +1.01 dB | 0.00020 | 5.9 ms |
+| Catmull-Rom | 0 | 0 | 0 | 0 | 0 | 0.00000 | 0.9 ms |
+| Lanczos2 | +0.04 dB | −0.02 dB | −0.01 dB | +0.05 dB | +0.01 dB | 0.00000 | 0.9 ms |
+| Mitchell-Netravali | −1.98 dB | −0.16 dB | −0.15 dB | −1.50 dB | −0.40 dB | 0.00000 | 0.8 ms |
+| Lanczos3 | −1.23 dB | −0.66 dB | −0.43 dB | −0.42 dB | −0.04 dB | 0.00005 | 1.2 ms |
+| Jinc2m | −3.48 dB | −2.65 dB | −1.75 dB | −1.02 dB | +1.61 dB | 0.00039 | 2.6 ms |
+
+How to read it. **A clean 1080p master** is where FSRCNNX 16 wins and ArtCNN DS loses, because
+ArtCNN is a denoiser as much as an upscaler and a clean reference has nothing to clean: it
+takes real detail with the noise. **A real film** — grain, and compression on top — is the
+other way round: ArtCNN DS gains a decibel on everyone else, because it is the only one that
+does not amplify what the encoder left behind (it keeps grain at 0.43 of the reference's, the
+others push it to 2.2). **Line art** wants a network, any network, and Catmull-Rom is the floor.
+**Jinc2m**, the filter's old default, is last on film everywhere and rings four times harder
+than anything else; it earns its place only on drawn lines.
+
+So: **ArtCNN C4F16 DS** if your films are grainy or heavily compressed and you have the 14 ms,
+**RAVU-zoom** if you want most of the gain for a quarter of the time and no ringing at all,
+**FSRCNNX 8 AR** if you want the sharpest edges per millisecond, **FSRCNNX 16 AR** if the time
+does not matter. If you would rather keep the grain than have it cleaned, stay away from
+ArtCNN DS and take FSRCNNX or RAVU-zoom.
+
+### What each one is worth: chroma
+
+**Chroma upsampling** has three entries beyond the kernels. **Jinc (EWA)** is the polar kernel
+madVR and mpv call Jinc: jinc(d) windowed by a jinc, cut at 3.2383 — the third zero, mpv's
+`ewa_lanczos`. It is not separable, so it reads a disc of about 33 texels around each point
+rather than a row and a column; chroma sits at a fixed place among the luma pixels, so the
+weights of the four possible positions are worked out when the conversion shader is generated
+and the shader only adds texels up. **RAVU-zoom** and **FSRCNNX 8 AR** instead put Cb and Cr
+through an mpv prescaler, each plane on its own and placed where the video's chroma siting puts
+it (MPEG-2, co-sited or centred). All three want Direct3D 11 and 4:2:0 in planes; elsewhere —
+4:2:2, the hardware video processor without the box below, Direct3D 9 — Catmull-Rom does it.
+
+Measured through the filter itself, on six 1080p film frames played as 4:2:0 with the chroma
+sited where video puts it and compared with the same frame in 4:4:4 (`playback_test --chroma`),
+plus the doom9 line-art test. PSNR of Cb and Cr over the picture, then along the luma's edges,
+where bleeding shows and where the eye looks:
+
+| Method | Cb/Cr | at luma edges | whole picture | line art, at edges | time |
+|---|---|---|---|---|---|
+| **Jinc (EWA)** | **+0.22 dB** | **+0.61 dB** | **+0.20 dB** | +0.25 dB | about 1 ms |
+| **RAVU-zoom** | −0.05 dB | +0.47 dB | −0.08 dB | +1.89 dB | 2.4 ms |
+| Catmull-Rom | 0 | 0 | 0 | 0 | free |
+| **FSRCNNX 8 AR** | −0.32 dB | −0.21 dB | −0.35 dB | **+2.28 dB** | 4.0 ms |
+| Bilinear | −0.29 dB | −0.73 dB | −0.26 dB | −1.55 dB | free |
+| Nearest-neighbor | −1.75 dB | −2.94 dB | −1.68 dB | −3.30 dB | free |
+
+Film and drawn lines want opposite things here, and the list is ordered for film, as asked.
+**Jinc** is the one to take: it is the only method above Catmull-Rom on both the colour itself
+and the colour along edges, it shifts nothing, and it costs about a millisecond. **RAVU-zoom**
+gains almost as much on edges but half a tenth of a decibel of overall colour, and leaves the
+one-tenth-of-a-level offset every luma-trained network leaves on a chroma plane. **FSRCNNX 8
+AR** is below Catmull-Rom on film — a network trained on luma has no business guessing colour
+from a photograph — and the best of all of them on drawn lines by a wide margin, which is why
+it is in the list at all: it is the entry for animation.
+
+Two methods the study measured and the filter does **not** offer: **KrigBilateral** collapses
+on line art (−6.7 dB) and is under Catmull-Rom on film; **CfL Prediction** wins only the
+synthetic case where chroma is a linear function of luma, which no real film is. **NGU**, the
+one that beats everything on the doom9 test, is closed.
+
+The **defaults are unchanged**: Upscaling is Jinc2m and Chroma upsampling Catmull-Rom for a
+fresh installation, and settings already saved in the registry are left alone — each entry
+carries its own number, so reordering the lists moved nobody's setting.
 
 The statistics show what they cost, next to the DLSS lines:
 
@@ -480,7 +551,7 @@ The statistics say which is happening, and why when the option does not apply:
 The box needs Direct3D 11 and costs the chroma pass, a few tenths of a millisecond at 1080p
 (RAVU-zoom, which enlarges Cb and Cr through its own shader first, costs about 3 ms).
 
-Render ahead (below) covers them as well: with FSRCNNX 16 a 4K picture takes more than the 8 ms
+Render ahead (below) covers them as well: with FSRCNNX 16 or ArtCNN a 4K picture takes more than the 8 ms
 the renderer allows itself, and without it the picture would reach the screen late.
 
 The shaders come from mpv's user-shader collections and are translated to HLSL once, offline:
@@ -488,9 +559,11 @@ The shaders come from mpv's user-shader collections and are translated to HLSL o
 libplacebo itself takes on Direct3D 11 — and writes `Shaders/mpv/<shader>/passNN.hlsl`, the
 lookup tables as half floats, the table `Source/Upscale/MpvShaderTables.h` and the generated
 blocks of `compile_shaders.cmd` and `MpcVideoRenderer.rc2`. `Source/Upscale/MpvShader.cpp` runs
-them the way libplacebo does: each pass renders into a texture of the size its WIDTH and HEIGHT
-give, reading the plane, what earlier passes saved and the tables. `--tmpvport` checks that
-this gives the harness's pictures exactly, and that the chroma siting is applied.
+them the way libplacebo does: each pass renders — or, for ArtCNN, dispatches — into a texture
+of the size its WIDTH and HEIGHT give, reading the plane, what earlier passes saved and the
+tables. A compute pass writes through unordered access slot 0, the one slot feature level 11.0
+always gives a compute shader. `--tmpvport` checks that this gives the harness's pictures
+exactly, to the last half float, and that the chroma siting is applied.
 
 ---
 
@@ -579,7 +652,15 @@ On the **Settings** page, bottom right:
 |---|---|---|
 | Render ahead to keep audio sync | on | See above. Used while DLSS 5 NR, DLSS SR or a luma prescaler runs. Needs Direct3D 11 |
 
-And in the **Shader video processor** box, under the Chroma upsampling list:
+In the **Shader video processor** box, the two lists are ordered best first (see *Upscaling*
+above) and each entry keeps its own number, so a setting already saved still means what it did:
+
+| Setting | Default | What it does |
+|---|---|---|
+| Upscaling | Jinc2m | ArtCNN C4F16 DS, RAVU-zoom and the four FSRCNNX entries enlarge the luma with a network; AR holds what it invented to the range the source covers. Needs Direct3D 11; Catmull-Rom stands in elsewhere and while DLSS SR is enlarging |
+| Chroma upsampling | Catmull-Rom | Jinc (EWA) is the best of them on film and about free; RAVU-zoom and FSRCNNX 8 AR put Cb and Cr through an mpv prescaler, FSRCNNX being the one for drawn lines. All three need Direct3D 11 and 4:2:0 in planes |
+
+And under the Chroma upsampling list:
 
 | Setting | Default | Notes |
 |---|---|---|

@@ -129,13 +129,18 @@ HRESULT CMpvShader::Texture::CheckCreate(ID3D11Device* pDevice, UINT w, UINT h)
 	desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; // what libplacebo gives the passes
 	desc.SampleDesc.Count = 1;
 	desc.Usage = D3D11_USAGE_DEFAULT;
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+	// Unordered access as well: which of the two a pass wants is not known here, and
+	// the flag costs nothing on a texture no pass writes that way.
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
 	HRESULT hr = pDevice->CreateTexture2D(&desc, nullptr, &pTexture);
 	if (SUCCEEDED(hr)) {
 		hr = pDevice->CreateShaderResourceView(pTexture, nullptr, &pShaderResource);
 	}
 	if (SUCCEEDED(hr)) {
 		hr = pDevice->CreateRenderTargetView(pTexture, nullptr, &pRenderTarget);
+	}
+	if (SUCCEEDED(hr)) {
+		hr = pDevice->CreateUnorderedAccessView(pTexture, nullptr, &pUnorderedAccess);
 	}
 	if (FAILED(hr)) {
 		Release();
@@ -148,6 +153,7 @@ HRESULT CMpvShader::Texture::CheckCreate(ID3D11Device* pDevice, UINT w, UINT h)
 
 void CMpvShader::Texture::Release()
 {
+	pUnorderedAccess.Release();
 	pRenderTarget.Release();
 	pShaderResource.Release();
 	pTexture.Release();
@@ -253,7 +259,9 @@ HRESULT CMpvShader::Load(ID3D11Device* pDevice, const MpvShaderInfo& info, UINT 
 		if (!source(p.resid, data, size)) {
 			return fail(E_FAIL);
 		}
-		hr = pDevice->CreatePixelShader(data, size, nullptr, &pass.pShader);
+		hr = p.blockW && p.blockH
+			? pDevice->CreateComputeShader(data, size, nullptr, &pass.pCompute)
+			: pDevice->CreatePixelShader(data, size, nullptr, &pass.pShader);
 		if (FAILED(hr)) {
 			return fail(hr);
 		}
@@ -478,11 +486,18 @@ HRESULT CMpvShader::Process(ID3D11DeviceContext* pContext, ID3D11ShaderResourceV
 	}
 	m_passOutput.assign(m_passes.size(), nullptr);
 
+	// The caller has just drawn into the plane these passes read. While its render
+	// target view is still bound, Direct3D drops the shader resource view of the same
+	// texture, and a compute pass -- which sets no render target of its own -- would
+	// read nothing but zeros.
+	pContext->OMSetRenderTargets(0, nullptr, nullptr);
+
 	pContext->IASetInputLayout(nullptr);
 	pContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	pContext->VSSetShader(m_pVertexShader, nullptr, 0);
 	pContext->OMSetBlendState(nullptr, nullptr, D3D11_DEFAULT_SAMPLE_MASK);
 	pContext->PSSetConstantBuffers(0, 1, &m_pConstants.p);
+	pContext->CSSetConstantBuffers(0, 1, &m_pConstants.p);
 
 	std::fill(m_saved.begin(), m_saved.end(), nullptr);
 	ID3D11ShaderResourceView* pPlane = pInput;
@@ -561,19 +576,35 @@ HRESULT CMpvShader::Process(ID3D11DeviceContext* pContext, ID3D11ShaderResourceV
 		memcpy(mr.pData, constants, sizeof(constants));
 		pContext->Unmap(m_pConstants, 0);
 
-		const D3D11_VIEWPORT viewport = { 0.0f, 0.0f, (FLOAT)w, (FLOAT)h, 0.0f, 1.0f };
 		const UINT slots = (UINT)(1 + pass.binds.size());
-		pContext->OMSetRenderTargets(1, &target.pRenderTarget.p, nullptr);
-		pContext->RSSetViewports(1, &viewport);
-		pContext->PSSetShader(pass.pShader, nullptr, 0);
-		pContext->PSSetShaderResources(0, slots, views);
-		pContext->PSSetSamplers(0, slots, samplers);
-		pContext->Draw(3, 0);
-
-		// A later pass reads this output: nothing may hold it as a target then.
 		ID3D11ShaderResourceView* noViews[1 + kMaxBinds] = {};
-		pContext->PSSetShaderResources(0, slots, noViews);
-		pContext->OMSetRenderTargets(0, nullptr, nullptr);
+		if (pass.pCompute) {
+			// One workgroup per block of output pixels, the last one partly outside:
+			// the pass drops what falls past the edge itself.
+			pContext->CSSetShader(pass.pCompute, nullptr, 0);
+			pContext->CSSetShaderResources(0, slots, views);
+			pContext->CSSetSamplers(0, slots, samplers);
+			pContext->CSSetUnorderedAccessViews(0, 1, &target.pUnorderedAccess.p, nullptr);
+			pContext->Dispatch((w + pass.pInfo->blockW - 1) / pass.pInfo->blockW,
+				(h + pass.pInfo->blockH - 1) / pass.pInfo->blockH, 1);
+
+			// A later pass reads this output: nothing may still be writing it.
+			ID3D11UnorderedAccessView* noAccess[1] = {};
+			pContext->CSSetUnorderedAccessViews(0, 1, noAccess, nullptr);
+			pContext->CSSetShaderResources(0, slots, noViews);
+		} else {
+			const D3D11_VIEWPORT viewport = { 0.0f, 0.0f, (FLOAT)w, (FLOAT)h, 0.0f, 1.0f };
+			pContext->OMSetRenderTargets(1, &target.pRenderTarget.p, nullptr);
+			pContext->RSSetViewports(1, &viewport);
+			pContext->PSSetShader(pass.pShader, nullptr, 0);
+			pContext->PSSetShaderResources(0, slots, views);
+			pContext->PSSetSamplers(0, slots, samplers);
+			pContext->Draw(3, 0);
+
+			// A later pass reads this output: nothing may hold it as a target then.
+			pContext->PSSetShaderResources(0, slots, noViews);
+			pContext->OMSetRenderTargets(0, nullptr, nullptr);
+		}
 
 		// What this pass was the last to read is free again.
 		for (size_t j = 0; j < i; j++) {

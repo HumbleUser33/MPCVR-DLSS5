@@ -230,15 +230,17 @@ static int RunMpvPort(ID3D11Device* dev, ID3D11DeviceContext* ctx, int maxRefs)
 			rc = 1;
 		}
 
-		// The three the filter offers, in both runners.
+		// The prescalers the filter offers, in both runners. ArtCNN is the one made of
+		// compute passes, so it is also what says the filter dispatches them right.
 		struct Shader {
 			const wchar_t* dir;            // the harness's translation
 			const MpvShaderInfo* pInfo;    // the filter's tables
 		};
 		const Shader shaders[] = {
-			{ L"FSRCNNX_x2_8-0-4-1",  &kMpvFSRCNNX8   },
-			{ L"FSRCNNX_x2_16-0-4-1", &kMpvFSRCNNX16  },
-			{ L"ravu-zoom-ar-r3",     &kMpvRavuZoomAR3 },
+			{ L"FSRCNNX_x2_8-0-4-1",  &kMpvFSRCNNX8      },
+			{ L"FSRCNNX_x2_16-0-4-1", &kMpvFSRCNNX16     },
+			{ L"ravu-zoom-ar-r3",     &kMpvRavuZoomAR3   },
+			{ L"ArtCNN_C4F16_DS",     &kMpvArtCNNC4F16DS },
 		};
 		CMpvFiles resources;
 

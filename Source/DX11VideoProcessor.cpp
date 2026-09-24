@@ -104,16 +104,44 @@ static const ScalingShaderResId s_Upscaling11ResIDs[UPSCALE_COUNT] = {
 	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"FSRCNNX 8"         },
 	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"FSRCNNX 16"        },
 	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"RAVU-zoom"         },
+	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"FSRCNNX 8 AR"      },
+	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"FSRCNNX 16 AR"     },
+	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"ArtCNN C4F16 DS"   },
 };
 
 static const MpvShaderInfo* MpvLumaShader(const int upscaling)
 {
 	switch (upscaling) {
-	case UPSCALE_FSRCNNX8:  return &kMpvFSRCNNX8;
-	case UPSCALE_FSRCNNX16: return &kMpvFSRCNNX16;
-	case UPSCALE_RAVUZoom:  return &kMpvRavuZoomAR3;
+	case UPSCALE_FSRCNNX8:
+	case UPSCALE_FSRCNNX8AR:  return &kMpvFSRCNNX8;
+	case UPSCALE_FSRCNNX16:
+	case UPSCALE_FSRCNNX16AR: return &kMpvFSRCNNX16;
+	case UPSCALE_RAVUZoom:    return &kMpvRavuZoomAR3;
+	case UPSCALE_ArtCNN:      return &kMpvArtCNNC4F16DS;
+	default:                  return nullptr;
+	}
+}
+
+// The prescaler on Cb and Cr, and whether either is held to the range the source
+// really covers around each point. RAVU carries its own anti-ringing inside the
+// kernel, which is what the AR of its name means; FSRCNNX and ArtCNN do not.
+static const MpvShaderInfo* MpvChromaShader(const int chromaScaling)
+{
+	switch (chromaScaling) {
+	case CHROMA_RAVU:       return &kMpvRavuZoomAR3;
+	case CHROMA_FSRCNNX8AR: return &kMpvFSRCNNX8;
 	default:                return nullptr;
 	}
+}
+
+static bool MpvLumaAntiRing(const int upscaling)
+{
+	return upscaling == UPSCALE_FSRCNNX8AR || upscaling == UPSCALE_FSRCNNX16AR;
+}
+
+static bool MpvChromaAntiRing(const int chromaScaling)
+{
+	return chromaScaling == CHROMA_FSRCNNX8AR;
 }
 
 // The compiled passes and tables of the mpv prescalers, from the resources.
@@ -737,6 +765,7 @@ void CDX11VideoProcessor::ReleaseVP()
 	for (int c = 0; c < 2; c++) {
 		m_TexMpvChromaIn[c].Release();
 		m_TexMpvChromaOut[c].Release();
+		m_TexMpvChromaAR[c].Release();
 	}
 	m_bMpvChromaActive = false;
 	m_bMpvChromaFailed = false;
@@ -802,7 +831,9 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_MpvChroma.Release();
 	m_pPSMpvLuma.Release();
 	m_pPSMpvCombine.Release();
+	m_pPSMpvCombineAR.Release();
 	m_pPSMpvChromaPlane.Release();
+	m_pPSMpvChromaAR.Release();
 	m_pMpvChromaPlaneConstants.Release();
 
 	m_pCorrectionConstants.Release();
@@ -1469,6 +1500,8 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPSMpvLuma, IDF_PS_11_MPV_LUMA));
 	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPSMpvCombine, IDF_PS_11_MPV_COMBINE));
 	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPSMpvChromaPlane, IDF_PS_11_MPV_CHROMA_PLANE));
+	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPSMpvCombineAR, IDF_PS_11_MPV_COMBINE_AR));
+	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPSMpvChromaAR, IDF_PS_11_MPV_CHROMA_AR));
 
 #if TEST_SHADER
 	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPS_TEST, IDF_PS_11_TEST));
@@ -2203,11 +2236,10 @@ HRESULT CDX11VideoProcessor::UpdateConvertTo444Shader()
 {
 	m_pCSConvertTo444.Release();
 
-	// RAVU-zoom where it runs, Catmull-Rom in its place elsewhere, as in the shader
-	// video processor.
+	// The prescaler where it runs, Catmull-Rom in its place elsewhere, as in the
+	// shader video processor.
 	UpdateMpvChroma();
-	const int chromaScaling = m_bMpvChromaActive ? CHROMA_RAVU
-		: (m_iChromaScaling == CHROMA_RAVU) ? CHROMA_CatmullRom : m_iChromaScaling;
+	const int chromaScaling = ChromaScalingForShader();
 
 	ID3DBlob* pShaderCode = nullptr;
 	HRESULT hr = GetShaderConvertTo444(m_srcWidth, m_TexSrcVideo.desc.Width, m_TexSrcVideo.desc.Height,
@@ -2227,14 +2259,18 @@ void CDX11VideoProcessor::ConvertTo444Pass(ID3D11UnorderedAccessView* pUav)
 	if (!m_pCSConvertTo444 || !pUav) {
 		return;
 	}
-	if (m_bMpvChromaActive) {
-		MpvChromaPass();   // RAVU-zoom brings Cb and Cr to the luma size first
+	if (m_bMpvChromaActive && FAILED(MpvChromaPass())) {
+		// The prescaler brings Cb and Cr to the luma size first; latched off if it
+		// cannot, and the conversion shader goes back to reading the planes.
+		m_bMpvChromaFailed = true;
+		UpdateConvertTo444Shader();
+		UpdateStatsStatic();
 	}
 
 	ID3D11ShaderResourceView* srvs[3] = {
 		m_TexSrcVideo.pShaderResource,
-		m_bMpvChromaActive ? m_TexMpvChromaOut[0].pShaderResource.p : m_TexSrcVideo.pShaderResource2.p,
-		m_bMpvChromaActive ? m_TexMpvChromaOut[1].pShaderResource.p : m_TexSrcVideo.pShaderResource3.p
+		m_bMpvChromaActive ? MpvChromaPlane(0) : m_TexSrcVideo.pShaderResource2.p,
+		m_bMpvChromaActive ? MpvChromaPlane(1) : m_TexSrcVideo.pShaderResource3.p
 	};
 	ID3D11SamplerState* samplers[2] = { m_pSamplerPoint, m_pSamplerLinear };
 	ID3D11UnorderedAccessView* uavs[1] = { pUav };
@@ -3406,6 +3442,7 @@ void CDX11VideoProcessor::UpdateUpscalingShaders()
 void CDX11VideoProcessor::UpdateMpvLuma()
 {
 	const MpvShaderInfo* pInfo = m_pDevice ? MpvLumaShader(m_iUpscaling) : nullptr;
+	m_bMpvLumaAntiRing = MpvLumaAntiRing(m_iUpscaling);
 	if (m_MpvLuma.Info() == pInfo) {
 		return;
 	}
@@ -3473,10 +3510,16 @@ HRESULT CDX11VideoProcessor::MpvLumaPass(Tex2D_t* pInputTexture, const CRect& rS
 			hr = m_TexMpvOutput.CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, w, h, Tex2D_DefaultShaderRTarget);
 		}
 		if (S_OK == hr) {
+			// The anti-ringing pass also reads the plane the network was given, to know
+			// what range it may keep.
 			m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexMpvLumaOut.pShaderResource.p);
-			hr = TextureCopyRect(m_TexMpvColor, m_TexMpvOutput.pTexture, rOut, rOut, m_pPSMpvCombine, nullptr, 0, false);
-			ID3D11ShaderResourceView* views[1] = {};
-			m_pDeviceContext->PSSetShaderResources(1, 1, views);
+			if (m_bMpvLumaAntiRing) {
+				m_pDeviceContext->PSSetShaderResources(2, 1, &m_TexMpvLuma.pShaderResource.p);
+			}
+			hr = TextureCopyRect(m_TexMpvColor, m_TexMpvOutput.pTexture, rOut, rOut,
+				m_bMpvLumaAntiRing ? m_pPSMpvCombineAR : m_pPSMpvCombine, nullptr, 0, false);
+			ID3D11ShaderResourceView* views[2] = {};
+			m_pDeviceContext->PSSetShaderResources(1, 2, views);
 		}
 		return hr;
 	};
@@ -3501,22 +3544,36 @@ void CDX11VideoProcessor::UpdateMpvChroma()
 {
 	// The shader video processor on 4:2:0 in two or three planes; the passes need
 	// feature level 11.0.
-	const bool bWanted = m_iChromaScaling == CHROMA_RAVU && !m_bMpvChromaFailed
+	const MpvShaderInfo* pInfo = MpvChromaShader(m_iChromaScaling);
+	const bool bWanted = pInfo && !m_bMpvChromaFailed
 		&& m_srcParams.Subsampling == 420
 		&& m_srcParams.pDX11Planes && m_srcParams.pDX11Planes->FmtPlane2
 		&& m_pDevice && m_pDevice->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_0;
 
-	if (bWanted && !m_MpvChroma.IsLoaded()) {
-		const HRESULT hr = m_MpvChroma.Load(m_pDevice, kMpvRavuZoomAR3, IDF_VS_11_MPV_HOOK, MpvResource);
-		DLogIf(FAILED(hr), L"CDX11VideoProcessor::UpdateMpvChroma() : RAVU-zoom not loaded, error {}", HR2Str(hr));
+	if (bWanted && m_MpvChroma.Info() != pInfo) {
+		m_MpvChroma.Release();
+		const HRESULT hr = m_MpvChroma.Load(m_pDevice, *pInfo, IDF_VS_11_MPV_HOOK, MpvResource);
+		DLogIf(FAILED(hr), L"CDX11VideoProcessor::UpdateMpvChroma() : {} not loaded, error {}", pInfo->name, HR2Str(hr));
 	} else if (!bWanted && m_MpvChroma.IsLoaded()) {
 		m_MpvChroma.Release();
 		for (int c = 0; c < 2; c++) {
 			m_TexMpvChromaIn[c].Release();
 			m_TexMpvChromaOut[c].Release();
+			m_TexMpvChromaAR[c].Release();
 		}
 	}
 	m_bMpvChromaActive = bWanted && m_MpvChroma.IsLoaded();
+	m_bMpvChromaAntiRing = m_bMpvChromaActive && MpvChromaAntiRing(m_iChromaScaling);
+}
+
+int CDX11VideoProcessor::ChromaScalingForShader() const
+{
+	if (MpvChromaShader(m_iChromaScaling)) {
+		// CHROMA_RAVU is what the conversion shader knows as "the planes are already
+		// at the luma size": which prescaler put them there is no business of its own.
+		return m_bMpvChromaActive ? CHROMA_RAVU : CHROMA_CatmullRom;
+	}
+	return m_iChromaScaling;
 }
 
 HRESULT CDX11VideoProcessor::MpvChromaPass()
@@ -3589,6 +3646,40 @@ HRESULT CDX11VideoProcessor::MpvChromaPass()
 		if (hr == S_OK && (m_TexMpvChromaOut[c].width != texW || m_TexMpvChromaOut[c].height != texH)) {
 			hr = E_FAIL;
 		}
+		if (hr != S_OK || !m_bMpvChromaAntiRing) {
+			continue;
+		}
+
+		// What the network invented past the colours really around that point, taken
+		// back: the same four samples the prescaler started from, at the same siting.
+		hr = m_TexMpvChromaAR[c].CheckCreate(m_pDevice, DXGI_FORMAT_R16G16B16A16_FLOAT, texW, texH, Tex2D_DefaultShaderRTarget);
+		if (FAILED(hr)) {
+			break;
+		}
+		const FLOAT shift[4] = { shiftX, shiftY, 0, 0 };
+		hr = m_pDeviceContext->Map(m_pMpvChromaPlaneConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr);
+		if (FAILED(hr)) {
+			break;
+		}
+		memcpy(mr.pData, shift, sizeof(shift));
+		m_pDeviceContext->Unmap(m_pMpvChromaPlaneConstants, 0);
+
+		CComPtr<ID3D11RenderTargetView> pArTargetView;
+		hr = m_pDevice->CreateRenderTargetView(m_TexMpvChromaAR[c].pTexture, nullptr, &pArTargetView);
+		if (FAILED(hr)) {
+			break;
+		}
+		const CRect rectFull(0, 0, texW, texH);
+		hr = FillVertexBuffer(m_pDeviceContext, m_pVertexBuffer, texW, texH, rectFull, 0, false);
+		if (FAILED(hr)) {
+			break;
+		}
+		D3D11_VIEWPORT VPFull = { 0.0f, 0.0f, (FLOAT)texW, (FLOAT)texH, 0.0f, 1.0f };
+		m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexMpvChromaIn[c].pShaderResource.p);
+		TextureBlt11(m_pDeviceContext, pArTargetView, VPFull, m_pVSimpleInputLayout, m_pVS_Simple, m_pPSMpvChromaAR,
+			m_TexMpvChromaOut[c].pShaderResource, m_pSamplerPoint, m_pMpvChromaPlaneConstants, m_pVertexBuffer);
+		ID3D11ShaderResourceView* noViews[1] = {};
+		m_pDeviceContext->PSSetShaderResources(1, 1, noViews);
 	}
 
 	return FAILED(hr) ? hr : (hr == S_OK ? S_OK : E_FAIL);
@@ -3617,10 +3708,9 @@ HRESULT CDX11VideoProcessor::UpdateConvertColorShader()
 
 	MediaSideDataDOVIMetadata* pDOVIMetadata = m_Dovi.bValid ? &m_Dovi.msd : nullptr;
 
-	// RAVU-zoom where it runs, Catmull-Rom in its place elsewhere.
+	// The prescaler where it runs, Catmull-Rom in its place elsewhere.
 	UpdateMpvChroma();
-	const int chromaScaling = m_bMpvChromaActive ? CHROMA_RAVU
-		: (m_iChromaScaling == CHROMA_RAVU) ? CHROMA_CatmullRom : m_iChromaScaling;
+	const int chromaScaling = ChromaScalingForShader();
 
 	HRESULT hr = GetShaderConvertColor(true,
 		m_srcWidth,
@@ -3726,7 +3816,8 @@ HRESULT CDX11VideoProcessor::ConvertColorPass(ID3D11Texture2D* pRenderTarget)
 		m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::MpvChroma);
 		if (FAILED(hrChroma)) {
 			// Latched off: the conversion shader goes back to reading the planes.
-			DLog(L"CDX11VideoProcessor::ConvertColorPass() : RAVU-zoom on chroma failed with error {}", HR2Str(hrChroma));
+			DLog(L"CDX11VideoProcessor::ConvertColorPass() : {} on chroma failed with error {}",
+				m_MpvChroma.Info() ? m_MpvChroma.Info()->name : L"the prescaler", HR2Str(hrChroma));
 			m_bMpvChromaFailed = true;
 			UpdateConvertColorShader();
 			UpdateStatsStatic();
@@ -3765,8 +3856,8 @@ HRESULT CDX11VideoProcessor::ConvertColorPass(ID3D11Texture2D* pRenderTarget)
 	}
 	m_pDeviceContext->PSSetShaderResources(0, 1, &m_TexSrcVideo.pShaderResource.p);
 	if (m_bMpvChromaActive) {
-		m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexMpvChromaOut[0].pShaderResource.p);
-		m_pDeviceContext->PSSetShaderResources(2, 1, &m_TexMpvChromaOut[1].pShaderResource.p);
+		ID3D11ShaderResourceView* chroma[2] = { MpvChromaPlane(0), MpvChromaPlane(1) };
+		m_pDeviceContext->PSSetShaderResources(1, 2, chroma);
 	} else {
 		m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexSrcVideo.pShaderResource2.p);
 		m_pDeviceContext->PSSetShaderResources(2, 1, &m_TexSrcVideo.pShaderResource3.p);
@@ -5387,7 +5478,9 @@ const wchar_t* CDX11VideoProcessor::ChromaScalingName() const
 	case CHROMA_Nearest:    return L"Nearest-neighbor";
 	case CHROMA_Bilinear:   return L"Bilinear";
 	case CHROMA_CatmullRom: return L"Catmull-Rom";
+	case CHROMA_Jinc:       return L"Jinc (EWA)";
 	case CHROMA_RAVU:       return m_bMpvChromaActive ? L"RAVU-zoom" : L"Catmull-Rom";
+	case CHROMA_FSRCNNX8AR: return m_bMpvChromaActive ? L"FSRCNNX 8 AR" : L"Catmull-Rom";
 	}
 	return L"?";
 }

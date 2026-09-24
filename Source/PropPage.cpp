@@ -128,8 +128,8 @@ void CVRMainPPage::SetControls()
 
 	SendDlgItemMessageW(IDC_COMBO6, CB_SETCURSEL, m_SetsPP.iResizeStats, 0);
 
-	SendDlgItemMessageW(IDC_COMBO5, CB_SETCURSEL, m_SetsPP.iChromaScaling, 0);
-	SendDlgItemMessageW(IDC_COMBO2, CB_SETCURSEL, m_SetsPP.iUpscaling, 0);
+	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO5, m_SetsPP.iChromaScaling);
+	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO2, m_SetsPP.iUpscaling);
 	SendDlgItemMessageW(IDC_COMBO3, CB_SETCURSEL, m_SetsPP.iDownscaling, 0);
 	SendDlgItemMessageW(IDC_COMBO4, CB_SETCURSEL, m_SetsPP.iSwapEffect, 0);
 
@@ -302,20 +302,29 @@ HRESULT CVRMainPPage::OnActivate()
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Allow turn on/off (fullscreen)");
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Allow turn on/off");
 
-	SendDlgItemMessageW(IDC_COMBO5, CB_ADDSTRING, 0, (LPARAM)L"Nearest-neighbor");
-	SendDlgItemMessageW(IDC_COMBO5, CB_ADDSTRING, 0, (LPARAM)L"Bilinear");
-	SendDlgItemMessageW(IDC_COMBO5, CB_ADDSTRING, 0, (LPARAM)L"Catmull-Rom");
-	SendDlgItemMessageW(IDC_COMBO5, CB_ADDSTRING, 0, (LPARAM)L"RAVU-zoom");
+	// Both lists are shown best first, as they measured on ten film references
+	// brought from 1080p to 4K (tools/dlssnr_probe, --tchroma and --tupscale, the
+	// tables in README-DLSS5.md). The number each entry carries is what is saved, so
+	// the order can change without moving anybody's setting.
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"Jinc (EWA)",         CHROMA_Jinc);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"RAVU-zoom",          CHROMA_RAVU);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"Catmull-Rom",        CHROMA_CatmullRom);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"FSRCNNX 8 AR",       CHROMA_FSRCNNX8AR);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"Bilinear",           CHROMA_Bilinear);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"Nearest-neighbor",   CHROMA_Nearest);
 
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Nearest-neighbor");
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Mitchell-Netravali");
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Catmull-Rom");
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Lanczos2");
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Lanczos3");
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"Jinc2m");
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"FSRCNNX 8");
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"FSRCNNX 16");
-	SendDlgItemMessageW(IDC_COMBO2, CB_ADDSTRING, 0, (LPARAM)L"RAVU-zoom");
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"ArtCNN C4F16 DS",    UPSCALE_ArtCNN);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"RAVU-zoom",          UPSCALE_RAVUZoom);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"FSRCNNX 16 AR",      UPSCALE_FSRCNNX16AR);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"FSRCNNX 8 AR",       UPSCALE_FSRCNNX8AR);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"FSRCNNX 16",         UPSCALE_FSRCNNX16);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"FSRCNNX 8",          UPSCALE_FSRCNNX8);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"Catmull-Rom",        UPSCALE_CatmullRom);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"Lanczos2",           UPSCALE_Lanczos2);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"Mitchell-Netravali", UPSCALE_Mitchell);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"Lanczos3",           UPSCALE_Lanczos3);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"Jinc2m",             UPSCALE_Jinc2);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"Nearest-neighbor",   UPSCALE_Nearest);
 
 	SendDlgItemMessageW(IDC_COMBO3, CB_ADDSTRING, 0, (LPARAM)L"Box");
 	SendDlgItemMessageW(IDC_COMBO3, CB_ADDSTRING, 0, (LPARAM)L"Bilinear");
@@ -378,8 +387,16 @@ HRESULT CVRMainPPage::OnActivate()
 		"and when every format above is ticked and the box below is\n"
 		"not; it still stands in for what the video processor refuses\n"
 		"(Dolby Vision, YCgCo, RGB on Nvidia).\n"
-		"RAVU-zoom (mpv prescaler on Cb and Cr): Direct3D 11,\n"
-		"4:2:0 only; Catmull-Rom is used elsewhere.");
+		"Listed best first, as measured on 1080p film.\n"
+		"Jinc (EWA): the polar kernel madVR calls Jinc, radius\n"
+		"3.2383. The best of them on film, +0.6 dB on the colour\n"
+		"along luma edges against Catmull-Rom, and about free.\n"
+		"RAVU-zoom and FSRCNNX 8 AR put Cb and Cr through an mpv\n"
+		"prescaler instead, for a few milliseconds: RAVU gains 0.5 dB,\n"
+		"FSRCNNX loses 0.2 on film but is the best of the four on\n"
+		"drawn lines, where it gains 2.3.\n"
+		"All three want Direct3D 11 and 4:2:0 in planes;\n"
+		"Catmull-Rom is used elsewhere.");
 	AddHint(IDC_CHECK27,
 		L"Available for Direct3D 11.\n"
 		"The shaders rebuild the chroma of a progressive YUV\n"
@@ -398,9 +415,16 @@ HRESULT CVRMainPPage::OnActivate()
 	AddHint(IDC_COMBO2,
 		L"Used to increase image size when the\n"
 		"DVXA2/D3D11 Video Processor is not used for resizing.\n"
-		"FSRCNNX 8/16 double the luma through a small network,\n"
-		"RAVU-zoom enlarges it to any size; the colour comes from\n"
-		"Catmull-Rom, which also covers the rest of the scale.\n"
+		"Listed best first, as measured on film brought to 4K.\n"
+		"FSRCNNX 8/16 and ArtCNN double the luma through a small\n"
+		"network, RAVU-zoom enlarges it to any size; the colour comes\n"
+		"from Catmull-Rom, which also covers the rest of the scale.\n"
+		"ArtCNN C4F16 DS is the best of them on grain and on\n"
+		"compression -- it cleans them as it enlarges -- and the\n"
+		"dearest, about 13 ms for 1080p to 4K on an RTX 3050.\n"
+		"AR holds what the network invented to the range the source\n"
+		"really covers: FSRCNNX rings without it, and RAVU-zoom\n"
+		"carries its own.\n"
 		"They need Direct3D 11; Catmull-Rom stands in elsewhere.\n"
 		"Greyed while the video processor is resizing what plays, or\n"
 		"while DLSS Super Resolution handles upscaling (DLSS page);\n"
@@ -624,7 +648,7 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 			if (nID == IDC_COMBO5) {
-				lValue = SendDlgItemMessageW(IDC_COMBO5, CB_GETCURSEL, 0, 0);
+				lValue = ComboBox_GetCurItemData(m_hWnd, IDC_COMBO5);
 				if (lValue != m_SetsPP.iChromaScaling) {
 					m_SetsPP.iChromaScaling = lValue;
 					SetDirty();
@@ -632,7 +656,7 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 			if (nID == IDC_COMBO2) {
-				lValue = SendDlgItemMessageW(IDC_COMBO2, CB_GETCURSEL, 0, 0);
+				lValue = ComboBox_GetCurItemData(m_hWnd, IDC_COMBO2);
 				if (lValue != m_SetsPP.iUpscaling) {
 					m_SetsPP.iUpscaling = lValue;
 					SetDirty();

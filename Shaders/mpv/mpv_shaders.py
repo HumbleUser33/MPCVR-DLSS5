@@ -21,7 +21,8 @@ Two uses:
 
     python mpv_shaders.py renderer [--upstream <dir>] [--tools <dir>]
 
-        The prescalers the renderer embeds (FSRCNNX 8 and 16, RAVU-zoom): their
+        The prescalers the renderer embeds (FSRCNNX 8 and 16, RAVU-zoom and
+        ArtCNN C4F16 DS): their
         passes under Shaders/mpv/<shader>/, lookup tables as half floats next to
         them, the tables in Source/Upscale/MpvShaderTables.h, and the generated
         blocks of Shaders/compile_shaders.cmd and Source/res/MpcVideoRenderer.rc2.
@@ -48,6 +49,7 @@ RENDERER_SHADERS = [
     ("FSRCNNX_x2_8-0-4-1.glsl", "FSRCNNX8", "FSRCNNX 8"),
     ("FSRCNNX_x2_16-0-4-1.glsl", "FSRCNNX16", "FSRCNNX 16"),
     ("ravu-zoom-ar-r3.hook", "RavuZoomAR3", "RAVU-zoom"),
+    ("ArtCNN_C4F16_DS.glsl", "ArtCNNC4F16DS", "ArtCNN C4F16 DS"),
 ]
 FIRST_RESOURCE_ID = 2000
 
@@ -182,7 +184,7 @@ def glsl_for(p, params, textures):
         bw, bh = p["compute"][0], p["compute"][1]
         tw, th = (p["compute"][2], p["compute"][3]) if len(p["compute"]) >= 4 else (bw, bh)
         out.append("layout(local_size_x = {}, local_size_y = {}) in;".format(tw, th))
-        out.append("layout(rgba16f, binding = {}) writeonly uniform image2D out_image;".format(MAX_BINDS + 1))
+        out.append("layout(rgba16f, binding = 0) writeonly uniform image2D out_image;")
     else:
         out.append("layout(location = 0) in vec2 pl_pos;")
         out.append("layout(location = 0) out vec4 pl_out;")
@@ -368,13 +370,17 @@ def renderer(upstream, tools):
         "// RAVU: Bin Jin (github.com/bjin/mpv-prescalers).",
         "// Both under the GNU Lesser General Public License 3.0 or later: see",
         "// Shaders/mpv/LICENSE.LGPL-3.0.txt.",
+        "//",
+        "// ArtCNN: Copyright (c) 2024 Joao Chrisostomo (github.com/Artoriuz/ArtCNN),",
+        "// MIT licence: see Shaders/mpv/LICENSE.MIT.txt.",
         "",
         "#pragma once",
         "",
         '#include "MpvShader.h"',
         "",
     ]
-    cmd = ["SET fxc_ps5=%fxcexe% /nologo /O2 /T ps_5_0", ""]
+    cmd = ["SET fxc_ps5=%fxcexe% /nologo /O2 /T ps_5_0",
+           "SET fxc_cs5=%fxcexe% /nologo /O2 /T cs_5_0", ""]
     rc = []
     files = []
     resid = FIRST_RESOURCE_ID
@@ -395,8 +401,8 @@ def renderer(upstream, tools):
         header = licence_header(text)
         pass_rows = []
         for n, p in enumerate(passes):
-            if p["compute"] or p["hooks"] != ["LUMA"] or p["offset"] not in (None, "ALIGN"):
-                raise ValueError("{}: pass {} is not a LUMA pixel pass the renderer runs".format(name, n))
+            if p["hooks"] != ["LUMA"] or p["offset"] not in (None, "ALIGN"):
+                raise ValueError("{}: pass {} is not a LUMA pass the renderer runs".format(name, n))
             base = "pass{:02d}".format(n)
             glsl_path, hlsl_path = translate_pass(p, params, textures, outdir, base, tools)
             os.remove(glsl_path)
@@ -410,12 +416,14 @@ def renderer(upstream, tools):
             open(hlsl_path, "w", encoding="utf-8", newline="\n").write("\n".join(intro) + "\n" + hlsl)
 
             cso = "mpv_{}_{}.cso".format(stem, base)
-            cmd.append('%fxc_ps5% /Fo "%workdir%\\{}" "mpv\\{}\\{}.hlsl"'.format(cso, stem, base))
+            cmd.append('%{}% /Fo "%workdir%\\{}" "mpv\\{}\\{}.hlsl"'.format(
+                "fxc_cs5" if p["compute"] else "fxc_ps5", cso, stem, base))
             rc.append('{:<31} FILE                    "..\\\\_bin\\\\shaders\\\\{}"'.format(resid, cso))
             files.append((resid, "_bin\\\\shaders\\\\" + cso))
-            pass_rows.append("\t{{ {}, {}, {}, {}, {}, {}, {}, {} }},".format(
+            block = p["compute"][:2] if p["compute"] else [0, 0]
+            pass_rows.append("\t{{ {}, {}, {}, {}, {}, {}, {}, {}, {}, {} }},".format(
                 cstr(p["desc"]), cstr(" ".join(p["hooks"])), cstr(" ".join(p["binds"])), cstr(p["save"]),
-                cstr(p["width"]), cstr(p["height"]), cstr(p["when"]), resid))
+                cstr(p["width"]), cstr(p["height"]), cstr(p["when"]), resid, block[0], block[1]))
             resid += 1
 
         texture_rows = []

@@ -235,15 +235,19 @@ private:
 	CGpuStageTimes m_DlssStageTimes;
 	CRollingMs m_DlssNRTimes;
 
-	// mpv prescalers (Shaders/mpv). As the Upscaling method, FSRCNNX or RAVU-zoom
-	// enlarges the luma and Catmull-Rom the picture, which takes the network's luma;
-	// the resize shaders then scale what is left. As Chroma upsampling, RAVU-zoom
-	// brings Cb and Cr to the luma size before the conversion shader reads them.
+	// mpv prescalers (Shaders/mpv). As the Upscaling method, FSRCNNX, RAVU-zoom or
+	// ArtCNN enlarges the luma and Catmull-Rom the picture, which takes the network's
+	// luma; the resize shaders then scale what is left. As Chroma upsampling, RAVU-zoom
+	// or FSRCNNX brings Cb and Cr to the luma size before the conversion shader reads
+	// them. The AR methods add anti-ringing: what the network invented beyond the range
+	// the source really covers is taken back.
 	CMpvShader m_MpvLuma;                     // loaded while the Upscaling method names one
-	CMpvShader m_MpvChroma;                   // RAVU-zoom for chroma
+	CMpvShader m_MpvChroma;                   // the prescaler the Chroma upsampling method names
 	CComPtr<ID3D11PixelShader> m_pPSMpvLuma;
 	CComPtr<ID3D11PixelShader> m_pPSMpvCombine;
+	CComPtr<ID3D11PixelShader> m_pPSMpvCombineAR;
 	CComPtr<ID3D11PixelShader> m_pPSMpvChromaPlane;
+	CComPtr<ID3D11PixelShader> m_pPSMpvChromaAR;
 	CComPtr<ID3D11Buffer> m_pMpvChromaPlaneConstants;
 	Tex2D_t m_TexMpvLuma;                     // luma of the picture at the source size
 	Tex2D_t m_TexMpvResize;                   // Catmull-Rom's first pass
@@ -252,8 +256,24 @@ private:
 	CMpvShader::Texture m_TexMpvLumaOut;      // the prescaler's luma
 	Tex2D_t m_TexMpvChromaIn[2];              // Cb and Cr in red, at the chroma size
 	CMpvShader::Texture m_TexMpvChromaOut[2]; // Cb and Cr at the luma size
-	bool m_bMpvChromaActive = false;          // the conversion shader reads m_TexMpvChromaOut
+	Tex2D_t m_TexMpvChromaAR[2];              // and those two held to the source's range
+	bool m_bMpvChromaActive = false;          // the conversion shader reads the planes below
+	bool m_bMpvChromaAntiRing = false;        // ... through m_TexMpvChromaAR
+	bool m_bMpvLumaAntiRing = false;          // the combine pass holds the luma to that range
 	bool m_bMpvChromaFailed = false;          // latched off until the format or the setting changes
+
+	// Where the conversion shader reads Cb (0) and Cr (1) while a prescaler is running:
+	// the anti-ringing pass's output where there is one, what the prescaler wrote when
+	// that pass has not run.
+	ID3D11ShaderResourceView* MpvChromaPlane(const int c) const {
+		return (m_bMpvChromaAntiRing && m_TexMpvChromaAR[c].pShaderResource)
+			? m_TexMpvChromaAR[c].pShaderResource.p : m_TexMpvChromaOut[c].pShaderResource.p;
+	}
+
+	// The chroma method the conversion shader is built for: a prescaler that runs tells
+	// it to read the planes the prescaler wrote, and one that cannot run leaves
+	// Catmull-Rom in its place.
+	int ChromaScalingForShader() const;
 
 	bool RenderAheadActive() const { return m_bDlssRenderAhead && (m_bDlssNRActive || m_bDlssSRActive || m_MpvLuma.IsLoaded()); }
 	void MarkPictureSubmitted();

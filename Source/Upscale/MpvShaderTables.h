@@ -8,6 +8,9 @@
 // RAVU: Bin Jin (github.com/bjin/mpv-prescalers).
 // Both under the GNU Lesser General Public License 3.0 or later: see
 // Shaders/mpv/LICENSE.LGPL-3.0.txt.
+//
+// ArtCNN: Copyright (c) 2024 Joao Chrisostomo (github.com/Artoriuz/ArtCNN),
+// MIT licence: see Shaders/mpv/LICENSE.MIT.txt.
 
 #pragma once
 
@@ -15,63 +18,76 @@
 
 // FSRCNNX_x2_8-0-4-1.glsl: 14 passes
 static const MpvPassInfo kMpvFSRCNNX8Passes[] = {
-	{ "feature map 1", "LUMA", "LUMA", "FEATURE1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2000 },
-	{ "feature map 2", "LUMA", "LUMA", "FEATURE2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2001 },
-	{ "mapping 1_1", "LUMA", "FEATURE1 FEATURE2", "MODEL21", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2002 },
-	{ "mapping 1_2", "LUMA", "FEATURE1 FEATURE2", "MODEL22", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2003 },
-	{ "mapping 2_1", "LUMA", "MODEL21 MODEL22", "MODEL1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2004 },
-	{ "mapping 2_2", "LUMA", "MODEL21 MODEL22", "MODEL2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2005 },
-	{ "mapping 3_1", "LUMA", "MODEL1 MODEL2", "MODEL21", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2006 },
-	{ "mapping 3_2", "LUMA", "MODEL1 MODEL2", "MODEL22", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2007 },
-	{ "mapping 4_1", "LUMA", "MODEL21 MODEL22", "MODEL1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2008 },
-	{ "mapping 4_2", "LUMA", "MODEL21 MODEL22", "MODEL2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2009 },
-	{ "sub-band residuals 1", "LUMA", "MODEL1 MODEL2 FEATURE1", "RES1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2010 },
-	{ "sub-band residuals 2", "LUMA", "MODEL1 MODEL2 FEATURE2", "RES2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2011 },
-	{ "sub-pixel convolution 1", "LUMA", "RES1 RES2", "SUBCONV1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2012 },
-	{ "aggregation", "LUMA", "SUBCONV1", nullptr, "LUMA.w 2 *", "LUMA.h 2 *", "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2013 },
+	{ "feature map 1", "LUMA", "LUMA", "FEATURE1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2000, 0, 0 },
+	{ "feature map 2", "LUMA", "LUMA", "FEATURE2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2001, 0, 0 },
+	{ "mapping 1_1", "LUMA", "FEATURE1 FEATURE2", "MODEL21", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2002, 0, 0 },
+	{ "mapping 1_2", "LUMA", "FEATURE1 FEATURE2", "MODEL22", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2003, 0, 0 },
+	{ "mapping 2_1", "LUMA", "MODEL21 MODEL22", "MODEL1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2004, 0, 0 },
+	{ "mapping 2_2", "LUMA", "MODEL21 MODEL22", "MODEL2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2005, 0, 0 },
+	{ "mapping 3_1", "LUMA", "MODEL1 MODEL2", "MODEL21", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2006, 0, 0 },
+	{ "mapping 3_2", "LUMA", "MODEL1 MODEL2", "MODEL22", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2007, 0, 0 },
+	{ "mapping 4_1", "LUMA", "MODEL21 MODEL22", "MODEL1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2008, 0, 0 },
+	{ "mapping 4_2", "LUMA", "MODEL21 MODEL22", "MODEL2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2009, 0, 0 },
+	{ "sub-band residuals 1", "LUMA", "MODEL1 MODEL2 FEATURE1", "RES1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2010, 0, 0 },
+	{ "sub-band residuals 2", "LUMA", "MODEL1 MODEL2 FEATURE2", "RES2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2011, 0, 0 },
+	{ "sub-pixel convolution 1", "LUMA", "RES1 RES2", "SUBCONV1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2012, 0, 0 },
+	{ "aggregation", "LUMA", "SUBCONV1", nullptr, "LUMA.w 2 *", "LUMA.h 2 *", "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2013, 0, 0 },
 };
 static const MpvShaderInfo kMpvFSRCNNX8 = { L"FSRCNNX 8", kMpvFSRCNNX8Passes, 14, nullptr, 0 };
 
 // FSRCNNX_x2_16-0-4-1.glsl: 26 passes
 static const MpvPassInfo kMpvFSRCNNX16Passes[] = {
-	{ "feature map 1", "LUMA", "LUMA", "FEATURE1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2014 },
-	{ "feature map 2", "LUMA", "LUMA", "FEATURE2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2015 },
-	{ "feature map 3", "LUMA", "LUMA", "FEATURE3", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2016 },
-	{ "feature map 4", "LUMA", "LUMA", "FEATURE4", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2017 },
-	{ "mapping 1_1", "LUMA", "FEATURE1 FEATURE2 FEATURE3 FEATURE4", "MODEL21", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2018 },
-	{ "mapping 1_2", "LUMA", "FEATURE1 FEATURE2 FEATURE3 FEATURE4", "MODEL22", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2019 },
-	{ "mapping 1_3", "LUMA", "FEATURE1 FEATURE2 FEATURE3 FEATURE4", "MODEL23", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2020 },
-	{ "mapping 1_4", "LUMA", "FEATURE1 FEATURE2 FEATURE3 FEATURE4", "MODEL24", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2021 },
-	{ "mapping 2_1", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2022 },
-	{ "mapping 2_2", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2023 },
-	{ "mapping 2_3", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL3", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2024 },
-	{ "mapping 2_4", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL4", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2025 },
-	{ "mapping 3_1", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4", "MODEL21", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2026 },
-	{ "mapping 3_2", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4", "MODEL22", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2027 },
-	{ "mapping 3_3", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4", "MODEL23", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2028 },
-	{ "mapping 3_4", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4", "MODEL24", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2029 },
-	{ "mapping 4_1", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2030 },
-	{ "mapping 4_2", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2031 },
-	{ "mapping 4_3", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL3", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2032 },
-	{ "mapping 4_4", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL4", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2033 },
-	{ "sub-band residuals 1", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4 FEATURE1", "RES1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2034 },
-	{ "sub-band residuals 2", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4 FEATURE2", "RES2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2035 },
-	{ "sub-band residuals 3", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4 FEATURE3", "RES3", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2036 },
-	{ "sub-band residuals 4", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4 FEATURE4", "RES4", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2037 },
-	{ "sub-pixel convolution 1", "LUMA", "RES1 RES2 RES3 RES4", "SUBCONV1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2038 },
-	{ "aggregation", "LUMA", "SUBCONV1", nullptr, "LUMA.w 2 *", "LUMA.h 2 *", "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2039 },
+	{ "feature map 1", "LUMA", "LUMA", "FEATURE1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2014, 0, 0 },
+	{ "feature map 2", "LUMA", "LUMA", "FEATURE2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2015, 0, 0 },
+	{ "feature map 3", "LUMA", "LUMA", "FEATURE3", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2016, 0, 0 },
+	{ "feature map 4", "LUMA", "LUMA", "FEATURE4", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2017, 0, 0 },
+	{ "mapping 1_1", "LUMA", "FEATURE1 FEATURE2 FEATURE3 FEATURE4", "MODEL21", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2018, 0, 0 },
+	{ "mapping 1_2", "LUMA", "FEATURE1 FEATURE2 FEATURE3 FEATURE4", "MODEL22", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2019, 0, 0 },
+	{ "mapping 1_3", "LUMA", "FEATURE1 FEATURE2 FEATURE3 FEATURE4", "MODEL23", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2020, 0, 0 },
+	{ "mapping 1_4", "LUMA", "FEATURE1 FEATURE2 FEATURE3 FEATURE4", "MODEL24", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2021, 0, 0 },
+	{ "mapping 2_1", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2022, 0, 0 },
+	{ "mapping 2_2", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2023, 0, 0 },
+	{ "mapping 2_3", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL3", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2024, 0, 0 },
+	{ "mapping 2_4", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL4", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2025, 0, 0 },
+	{ "mapping 3_1", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4", "MODEL21", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2026, 0, 0 },
+	{ "mapping 3_2", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4", "MODEL22", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2027, 0, 0 },
+	{ "mapping 3_3", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4", "MODEL23", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2028, 0, 0 },
+	{ "mapping 3_4", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4", "MODEL24", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2029, 0, 0 },
+	{ "mapping 4_1", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2030, 0, 0 },
+	{ "mapping 4_2", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2031, 0, 0 },
+	{ "mapping 4_3", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL3", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2032, 0, 0 },
+	{ "mapping 4_4", "LUMA", "MODEL21 MODEL22 MODEL23 MODEL24", "MODEL4", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2033, 0, 0 },
+	{ "sub-band residuals 1", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4 FEATURE1", "RES1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2034, 0, 0 },
+	{ "sub-band residuals 2", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4 FEATURE2", "RES2", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2035, 0, 0 },
+	{ "sub-band residuals 3", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4 FEATURE3", "RES3", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2036, 0, 0 },
+	{ "sub-band residuals 4", "LUMA", "MODEL1 MODEL2 MODEL3 MODEL4 FEATURE4", "RES4", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2037, 0, 0 },
+	{ "sub-pixel convolution 1", "LUMA", "RES1 RES2 RES3 RES4", "SUBCONV1", nullptr, nullptr, "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2038, 0, 0 },
+	{ "aggregation", "LUMA", "SUBCONV1", nullptr, "LUMA.w 2 *", "LUMA.h 2 *", "OUTPUT.w LUMA.w / 1.300 > OUTPUT.h LUMA.h / 1.300 > *", 2039, 0, 0 },
 };
 static const MpvShaderInfo kMpvFSRCNNX16 = { L"FSRCNNX 16", kMpvFSRCNNX16Passes, 26, nullptr, 0 };
 
 // ravu-zoom-ar-r3.hook: 1 passes
 static const MpvPassInfo kMpvRavuZoomAR3Passes[] = {
-	{ "RAVU-Zoom-AR (luma, r3)", "LUMA", "HOOKED ravu_zoom_lut3 ravu_zoom_lut3_ar", nullptr, "OUTPUT.w", "OUTPUT.h", "HOOKED.w OUTPUT.w < HOOKED.h OUTPUT.h < *", 2040 },
+	{ "RAVU-Zoom-AR (luma, r3)", "LUMA", "HOOKED ravu_zoom_lut3 ravu_zoom_lut3_ar", nullptr, "OUTPUT.w", "OUTPUT.h", "HOOKED.w OUTPUT.w < HOOKED.h OUTPUT.h < *", 2040, 0, 0 },
 };
 static const MpvTextureInfo kMpvRavuZoomAR3Textures[] = {
 	{ "ravu_zoom_lut3", 45, 2592, true, 2041 },
 	{ "ravu_zoom_lut3_ar", 18, 2592, true, 2042 },
 };
 static const MpvShaderInfo kMpvRavuZoomAR3 = { L"RAVU-zoom", kMpvRavuZoomAR3Passes, 1, kMpvRavuZoomAR3Textures, 2 };
+
+// ArtCNN_C4F16_DS.glsl: 8 passes
+static const MpvPassInfo kMpvArtCNNC4F16DSPasses[] = {
+	{ "ArtCNN C4F16 DS (Conv2D)", "LUMA", "LUMA", "conv2d", "LUMA.w 2.0 *", "LUMA.h 2.0 *", "OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *", 2043, 24, 32 },
+	{ "ArtCNN C4F16 DS (Conv2D-1-ReLU)", "LUMA", "conv2d", "conv2d_1", "LUMA.w 2.0 *", "LUMA.h 2.0 *", "OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *", 2044, 24, 32 },
+	{ "ArtCNN C4F16 DS (Conv2D-2-ReLU)", "LUMA", "conv2d_1", "conv2d_2", "LUMA.w 2.0 *", "LUMA.h 2.0 *", "OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *", 2045, 24, 32 },
+	{ "ArtCNN C4F16 DS (Conv2D-3-ReLU)", "LUMA", "conv2d_2", "conv2d_3", "LUMA.w 2.0 *", "LUMA.h 2.0 *", "OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *", 2046, 24, 32 },
+	{ "ArtCNN C4F16 DS (Conv2D-4-ReLU)", "LUMA", "conv2d_3", "conv2d_4", "LUMA.w 2.0 *", "LUMA.h 2.0 *", "OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *", 2047, 24, 32 },
+	{ "ArtCNN C4F16 DS (Conv2D-5)", "LUMA", "conv2d_4", "conv2d_5", "LUMA.w 2.0 *", "LUMA.h 2.0 *", "OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *", 2048, 24, 32 },
+	{ "ArtCNN C4F16 DS (Conv2D-6)", "LUMA", "conv2d conv2d_5", "conv2d_6", "LUMA.w 1.0 *", "LUMA.h 1.0 *", "OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *", 2049, 12, 16 },
+	{ "ArtCNN C4F16 DS (Depth-To-Space)", "LUMA", "conv2d_6", nullptr, "LUMA.w 2.0 *", "LUMA.h 2.0 *", "OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *", 2050, 12, 16 },
+};
+static const MpvShaderInfo kMpvArtCNNC4F16DS = { L"ArtCNN C4F16 DS", kMpvArtCNNC4F16DSPasses, 8, nullptr, 0 };
 
 // The files behind the resources, from the repository root, for the harness.
 #ifdef MPV_SHADER_FILES
@@ -119,5 +135,13 @@ static const struct { UINT resid; const wchar_t* path; } kMpvShaderFiles[] = {
 	{ 2040, L"_bin\\shaders\\mpv_ravu-zoom-ar-r3_pass00.cso" },
 	{ 2041, L"Shaders\\mpv\\ravu-zoom-ar-r3\\ravu_zoom_lut3.bin" },
 	{ 2042, L"Shaders\\mpv\\ravu-zoom-ar-r3\\ravu_zoom_lut3_ar.bin" },
+	{ 2043, L"_bin\\shaders\\mpv_ArtCNN_C4F16_DS_pass00.cso" },
+	{ 2044, L"_bin\\shaders\\mpv_ArtCNN_C4F16_DS_pass01.cso" },
+	{ 2045, L"_bin\\shaders\\mpv_ArtCNN_C4F16_DS_pass02.cso" },
+	{ 2046, L"_bin\\shaders\\mpv_ArtCNN_C4F16_DS_pass03.cso" },
+	{ 2047, L"_bin\\shaders\\mpv_ArtCNN_C4F16_DS_pass04.cso" },
+	{ 2048, L"_bin\\shaders\\mpv_ArtCNN_C4F16_DS_pass05.cso" },
+	{ 2049, L"_bin\\shaders\\mpv_ArtCNN_C4F16_DS_pass06.cso" },
+	{ 2050, L"_bin\\shaders\\mpv_ArtCNN_C4F16_DS_pass07.cso" },
 };
 #endif
