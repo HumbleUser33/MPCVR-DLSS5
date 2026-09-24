@@ -6,6 +6,14 @@ video pipeline, with a temporal stabilizer made for video, and an experimental o
 enlarge the picture with **DLSS Super Resolution** (NGX feature 1) instead of the resize
 shaders.
 
+Neither pass is a denoiser. Feature 18 **reconstructs the picture**: it rebuilds detail and
+edges, and what it takes out of the grain and the compression noise is a consequence of that,
+not the job it was given. DLSS Super Resolution, in the 4.5 DLLs this was built against,
+rebuilds the picture as it enlarges it and comes out **cleaner than the source**: it takes
+about 70 % of the film grain out over time, and on compressed film it lands above Catmull-Rom
+on moving pictures. Which of the two you want, and whether that cleaner look suits your films,
+is your call: both are optional and off by default.
+
 The renderer stays a Direct3D 11 filter. Nothing about its existing pipeline changes when
 the feature is off, and the rendering is bit-identical to upstream in that state.
 
@@ -343,7 +351,11 @@ frames (PSNR in dB; *grain* is the fine detail left in flat areas, the source ke
 
 With the vectors a player can compute, DLSS SR stays **less faithful than Catmull-Rom on
 clean film**, 3 to 4 dB below. On compressed film it is level with it on still pictures, 0.4 dB
-below, and 1.5 dB above on moving ones. It **removes about 70 % of the film grain** over time.
+below, and **1.5 dB above on moving ones**: where the source carries compression noise, the
+reconstruction is worth more than the fidelity it costs. It also **takes about 70 % of the film
+grain out** over time, and the grain it leaves flickers 3.5 times less (0.68 against 2.40).
+That degraining and denoising is what DLSS 4.5 gives a film beyond the enlargement, and on a
+grainy source it is what you will notice first.
 The cleaned vectors gain 0.3 to 1.2 dB on still pictures and 2.7 to 3.0 dB on moving ones over
 the raw vectors of 1.2 (50.6, 49.7, 0.73, 46.2 and 45.5 on the row above), and remove a little
 more grain. Without jitter a still picture gives DLSS
