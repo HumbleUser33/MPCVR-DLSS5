@@ -21,7 +21,7 @@ DLSS Super Resolution 4.5 for upscaling (experimental), fed motion vectors made 
 Six new upscalers, chosen by measurement
 - ArtCNN C4F16 DS — could be better on real film (grain + compression), best for animes
 - FSRCNNX 8 / 16 and RAVU-zoom — sharper edges than any classic filter
--Anti-ringing versions of FSRCNNX, which kill the bright halo networks leave along dark lines (4× less overshoot, and on drawn lines it's better, not just cleaner).
+- Anti-ringing versions of FSRCNNX, which kill the bright halo networks leave along dark lines (4× less overshoot, and on drawn lines it's better, not just cleaner).
 Both lists are now ordered best-first, but the choice is yours wether you prefer sharp or precise, etc. The list is ordered for compressed movies 1080p to 4K.
 
 "Replace VP chroma upsampling" — Does Chroma Upsampling by shader before the GPU, to avoid bilinear chroma upsampling by GPU => hands the GPU's video processor a full 4:4:4 picture. On 10-bit film that's +7 dB of colour, it kills a colour shift the NVIDIA driver introduces, and it makes RTX Video HDR now work on 10-bit sources (it did nothing there before).
